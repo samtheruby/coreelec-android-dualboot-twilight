@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reboot to CoreELEC</string>
+    <string name="enable_usb_debugging_first">Enable USB debugging first in the developer options</string>
+    <string name="first_reboot_to_coreelec">First reboot</string>
+    <string name="first_reboot_to_coreelec_info">"'"&lt;b>First reboot&lt;/b>"'" must be executed when CoreELEC is started for the first time or after an update of the Android system.</string>
+    <string name="information">Information</string>
+    <string name="ip" translatable="false">127.0.0.1</string>
+    <string name="reboot_to_coreelec">Reboot</string>
+    <string name="reboot_to_coreelec_info">Restarts the device into &lt;b>CoreELEC&lt;/b>. To return to &lt;b>Android&lt;/b>, just reboot or turn the device off and on as usual.</string>
+</resources>

@@ -1,0 +1,6 @@
+id=blockgms_sysupdate
+name=Block GMS System Update (Google TV)
+version=v1.0
+versionCode=1
+author=cavecrew
+description=Disables the Google Play Services system-update COMPONENTS (SystemUpdateService/GcmTaskService/PersistentListener + the Check-for-updates UI) so an A/B OTA cannot be fetched/applied and clobber an internal CoreELEC dual-boot. GMS core (Play, accounts, casting, app updates) is untouched. Reversible: remove this module + `pm enable` the components. Generic to Google/Android TV boxes.

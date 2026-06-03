@@ -1,0 +1,20 @@
+# Xiaomi TV Stick 4K (2nd Gen) BLE remote -- uhid 0005:2717:32B9
+#
+# The remote's special buttons emit HID Consumer-page scancodes that the kernel
+# maps to keycodes Kodi can't bind (Netflix/Voice arrive as <unicode> 0xfffe).
+# Remap them at the evdev layer to keys Kodi DOES name, then bind in the Kodi
+# keymap (xiaomi.xml). hwdb re-applies on every device add, so it survives the
+# remote disconnecting/reconnecting and CoreELEC OS updates (file lives in /storage).
+#
+#   button       HID scancode   -> remapped key   Kodi action (xiaomi.xml)
+#   OK/center    0xc0041        -> KEY_ENTER       Select (Kodi default)
+#   Netflix      0xc008e        -> KEY_RED         RunAddon(script.plexmod)   [PM4K]
+#   Voice        0xc00cf        -> KEY_GREEN       RunAddon(script.tinyppi)
+#   PrimeVideo   0xc00b0        -> KEY_YELLOW      RunAddon(script.tinyppi)
+#
+# Xiaomi-TV (0x150/WWW), YouTube (0x1a9), Apps (0xd8) left untouched.
+evdev:input:b0005v2717p32B9*
+ KEYBOARD_KEY_c0041=enter
+ KEYBOARD_KEY_c008e=red
+ KEYBOARD_KEY_c00cf=green
+ KEYBOARD_KEY_c00b0=yellow

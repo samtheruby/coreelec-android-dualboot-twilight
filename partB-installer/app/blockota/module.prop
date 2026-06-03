@@ -1,0 +1,6 @@
+id=blockota_twilight
+name=Block OTA (twilight CoreELEC dual-boot)
+version=v1.0
+versionCode=1
+author=partB-installer
+description=Disables the Xiaomi OTA updater on every boot so an A/B update cannot overwrite the inactive (CoreELEC) boot/dtbo slot or flip the active slot. Re-applies each boot, so it survives a re-enable; remove the module to restore OTA.

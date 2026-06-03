@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="script.coreelec.toolbox"
+       name="CoreELEC Toolbox"
+       version="1.0.0"
+       provider-name="cavecrew">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.script" library="default.py" />
+    <extension point="xbmc.addon.metadata">
+        <summary>Android dual-boot helpers for CoreELEC</summary>
+        <description>Utilities for an Amlogic CoreELEC + Android internal dual-boot: sync Bluetooth remotes paired in Android over to CoreELEC (no re-pairing), choose which OS boots by default, and fix the WiFi MAC if CoreELEC shows a wrong/shared default. Generic to Amlogic CoreELEC boxes.</description>
+        <platform>all</platform>
+        <news>
+v1.0.0
+- Initial release: Bluetooth remote sync from Android, default boot OS, WiFi MAC fix.
+        </news>
+        <assets>
+            <icon>resources/icon.png</icon>
+            <fanart>resources/fanart.png</fanart>
+        </assets>
+    </extension>
+</addon>

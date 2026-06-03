@@ -1,0 +1,39 @@
+# Normalize all text to LF in the repo and on checkout.
+# CRITICAL: scripts in this project run on Linux (CoreELEC) and Android. They MUST
+# be LF — a CRLF service.sh / user-update.sh / cfgload / .hwdb breaks on-device.
+# This makes line endings correct regardless of the committer's OS (no WSL needed).
+* text=auto eol=lf
+
+# Windows-only helpers keep CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Scripts that execute on-device — force LF explicitly (belt and suspenders).
+*.sh        text eol=lf
+*.py        text eol=lf
+*.hwdb      text eol=lf
+*.xml       text eol=lf
+*.ini       text eol=lf
+gradlew     text eol=lf
+cfgload     text eol=lf
+cfgload_env text eol=lf
+aml_autoscript text eol=lf
+user-update.sh text eol=lf
+service.sh  text eol=lf
+
+# Binary — never touch EOLs, never diff as text.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.jar  binary
+*.apk  binary
+*.img  binary
+*.bin  binary
+*.gz   binary
+*.zip  binary
+*.rar  binary
+*.pdf  binary
+*.dtb  binary
+*.ko   binary
+*.so   binary

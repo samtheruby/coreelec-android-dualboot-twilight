@@ -1,0 +1,67 @@
+# =====================================================================
+# Whitelist the repo root: ignore EVERYTHING, then re-include only the
+# files needed to run the installer + build scripts. This is deliberate
+# defense-in-depth: the working dir holds device backups containing
+# per-device identity (serial, did_key, cpu_id, ethaddr) and multi-GB
+# OS images that must never be published. Default-deny prevents leaks.
+# =====================================================================
+/*
+!/.gitattributes
+!/.gitignore
+!/README.md
+!/research.md
+!/partB-installer/
+
+# =====================================================================
+# Inside partB-installer/: keep source (build + installer + app + addon
+# + remote payload), drop generated artifacts, device backups, build junk.
+# =====================================================================
+
+# Generated artifacts — rebuilt by build/build_all.py from a CoreELEC img.
+partB-installer/artifacts/
+partB-installer/dist/
+partB-installer/*.zip
+
+# Device-pulled backups — CONTAIN PER-DEVICE IDENTITY. Never publish.
+partB-installer/pulled_backups/
+partB-installer/pulled_backups_prerestore/
+
+# Defense-in-depth: never commit a raw device identity/env dump ANYWHERE in the
+# tree, even if copied into an otherwise-tracked dir. The build's only committed
+# inputs live in partB-installer/refdata/ and are identity-free: the stock GPT
+# halves (stock_gpt_*.bin — random GUIDs + generic names only) + env_additions.json
+# (the 9 generic boot keys). These deny-patterns do NOT match those names.
+**/env_live*.bin
+**/env_p2*.bin
+**/env_current*.bin
+**/env_target.bin
+**/env_factory.bin
+**/env_ref_ce_*.bin
+**/disk_first2M.bin
+**/disk_last2M.bin
+**/*_pre.bin
+**/*_pre_gate*.bin
+**/cpu_id*
+**/did_key*
+
+# Empty/scratch.
+partB-installer/tools/
+partB-installer/**/__pycache__/
+
+# payload/: huge CoreELEC build input (SYSTEM, kernel, etc.), regenerated
+# from a downloaded CoreELEC Generic image. Keep only the small remote keymap
+# and our own update-recovery hook (user-update.sh); drop CoreELEC binaries.
+partB-installer/payload/*
+!partB-installer/payload/remote/
+!partB-installer/payload/flash/
+partB-installer/payload/flash/*
+!partB-installer/payload/flash/user-update.sh
+
+# Vendored Android app (Reboot to CoreELEC): keep source, drop build output
+# + machine-local config (local.properties carries your local SDK path).
+partB-installer/app/RebootToCoreELEC/.gradle/
+partB-installer/app/RebootToCoreELEC/build/
+partB-installer/app/RebootToCoreELEC/app/build/
+partB-installer/app/RebootToCoreELEC/local.properties
+partB-installer/app/RebootToCoreELEC/.idea/
+partB-installer/**/*.iml

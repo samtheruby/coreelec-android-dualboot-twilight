@@ -1,0 +1,6 @@
+id=toolbox_export
+name=CoreELEC Toolbox export (Android -> CoreELEC)
+version=v1.0
+versionCode=1
+author=cavecrew
+description=Exports Android Bluetooth pairings (bt_config.conf) + the WiFi/BT MAC to /flash on each boot, so the CoreELEC Toolbox addon can sync BT remotes. Needed because Android userdata is encrypted and CoreELEC can't read it directly. Reboot Android once after pairing a new remote to refresh the export.

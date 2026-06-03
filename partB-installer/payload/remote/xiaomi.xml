@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Xiaomi TV Stick remote keymap.
+     The special buttons are remapped to colored keys at the evdev layer by
+     99-xiaomi-remote.hwdb (Netflix->RED, Voice->GREEN, PrimeVideo->YELLOW).
+     OK->ENTER which Kodi already treats as Select, so no entry is needed here. -->
+<keymap>
+  <global>
+    <keyboard>
+      <red>RunAddon(script.plexmod)</red>
+      <green>RunAddon(script.tinyppi)</green>
+      <yellow>RunAddon(script.tinyppi)</yellow>
+    </keyboard>
+  </global>
+</keymap>

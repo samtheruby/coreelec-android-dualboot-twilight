@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.jamal2367.coreelec'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.jamal2367.coreelec'
+        minSdk 24
+        targetSdk 34
+        versionCode 50
+        versionName '5.0'
+        resConfigs 'en', 'de', 'hu'
+        setProperty('archivesBaseName', 'Reboot_to_CoreELEC_' + versionName)
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            shrinkResources false
+            crunchPngs false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            applicationIdSuffix = ".debug"
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            crunchPngs true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // adblib removed: the app now flips boot_ce locally via root (EnvFlip), no adb/TCP.
+}
