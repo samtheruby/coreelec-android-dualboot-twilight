@@ -190,7 +190,13 @@ def stage1b(a):
     print("  then approve the root-access dialog for ADB shell.")
     print("  Waiting for root (up to 120 s -- tap Allow on device when prompted) ...")
     for _ in range(120):
-        root_out, _ = su(a.serial, "id")
+        try:
+            r = subprocess.run(
+                ["adb", "-s", a.serial, "exec-out", "su -c 'id'"],
+                capture_output=True, timeout=3)
+            root_out = r.stdout.decode("utf-8", "replace")
+        except subprocess.TimeoutExpired:
+            root_out = ""
         if "uid=0" in root_out:
             print("  Root verified: Magisk is active.")
             print("\nstage1b done. Run stage2 now:")
