@@ -170,7 +170,7 @@ def stage0(a):
 
 # ---- stage 1b: re-install Magisk APK after the stage1 factory reset ---------
 def stage1b(a):
-    import time, glob as _glob
+    import glob as _glob
     print("== stage1b: re-install Magisk APK (factory reset wiped userdata) ==")
     print("  (init_boot_a is still patched -- no fastboot needed)")
 
@@ -186,26 +186,27 @@ def stage1b(a):
     if r.returncode != 0:
         sys.exit(f"  APK install failed: {out}")
     print("  Magisk APK installed OK")
-    print("  Open the Magisk app on the device and complete first-time setup,")
-    print("  then approve the root-access dialog for ADB shell.")
-    print("  Waiting for root (up to 120 s -- tap Allow on device when prompted) ...")
-    for _ in range(120):
-        try:
-            r = subprocess.run(
-                ["adb", "-s", a.serial, "exec-out", "su -c 'id'"],
-                capture_output=True, timeout=3)
-            root_out = r.stdout.decode("utf-8", "replace")
-        except subprocess.TimeoutExpired:
-            root_out = ""
-        if "uid=0" in root_out:
-            print("  Root verified: Magisk is active.")
-            print("\nstage1b done. Run stage2 now:")
-            print(f"  python install.py stage2 --serial {a.serial}")
-            return 0
-        time.sleep(1)
-    print("  Root not confirmed within 120 s.")
-    print("  Verify manually:  adb shell su -c id")
-    print("  Then run:         python install.py stage2")
+    print()
+    print("  On the device:")
+    print("    1. Open the Magisk app and complete any first-time setup")
+    print("    2. Magisk -> Settings -> Default su permission -> Allow")
+    print("  Then in a separate terminal verify root is working:")
+    print("    adb shell su -c id   # should return uid=0(root)")
+    print()
+    input("  Press Enter here once uid=0 is confirmed ...")
+    try:
+        r = subprocess.run(["adb", "-s", a.serial, "exec-out", "su -c 'id'"],
+                           capture_output=True, timeout=10)
+        root_out = r.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        root_out = ""
+    if "uid=0" in root_out:
+        print("  Root confirmed.")
+    else:
+        print(f"  WARNING: could not confirm root ({root_out.strip() or 'no output'}).")
+        print("  Check Magisk is set up, then continue -- stage2 will fail if root is missing.")
+    print(f"\nstage1b done. Run stage2 now:")
+    print(f"  python install.py stage2 --serial {a.serial}")
     return 0
 
 
