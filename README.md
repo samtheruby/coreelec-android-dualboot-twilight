@@ -83,15 +83,16 @@ Skip if `adb shell su -c id` already returns `uid=0`.
 - Install the Magisk app: `adb -s <ip:port> install Magisk.apk`
 - Get `init_boot.img` — from your OTA package, or push via `adb push init_boot.img /sdcard/`
 - In Magisk: **Install → Select and patch a file**, pick `init_boot.img`
-- Pull the result and place it in the bundle folder (next to `installer/`):
+- Pull the result into the bundle's `magisk/` folder with the device-prefixed name:
   ```
-  adb pull /sdcard/Download/magisk_patched-*.img init_boot_patched.img
+  adb pull /sdcard/Download/magisk_patched-*.img magisk/twilight-init_boot-patched.img
   ```
 - Flash it (USB must be connected for fastboot):
   ```
   python installer/install.py stage_magisk --serial <ip:port>
   ```
-  The installer reboots into the bootloader, flashes `init_boot_a`, and reboots back.
+  The installer auto-detects the device name, picks `magisk/twilight-init_boot-patched.img`,
+  reboots into the bootloader, flashes `init_boot_a`, and reboots back.
   Verify root: `adb shell su -c id` → `uid=0`.
 
 **4. Back up + preflight (safe, no changes)**
@@ -162,10 +163,13 @@ standalone.
 ```
 python installer/install.py stage_magisk --serial <ip:port>
 ```
-Reboots the stick into the fastboot bootloader, flashes `init_boot_a` with the Magisk-patched image
-(`init_boot_patched.img` — auto-found in `artifacts/` or the bundle root, or pass `--magisk-img <path>`),
-then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone isn't enough for the
-bootloader flash). Use `--fastboot-serial <serial>` if multiple fastboot devices are connected.
+Reboots the stick into the fastboot bootloader, flashes `init_boot_a` with the Magisk-patched image,
+then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone isn't enough).
+
+The image is auto-located by device name: `magisk/{device}-init_boot-patched.img` (e.g.
+`magisk/twilight-init_boot-patched.img`). Falls back to `artifacts/` and the bundle root for
+compatibility. Override with `--magisk-img <path>`. Use `--fastboot-serial <serial>` if multiple
+fastboot devices are connected.
 
 Only needed once per unit. If root is already active, skip it.
 
@@ -281,6 +285,7 @@ partB-installer/
   artifacts/    gpt_primary/backup, boota.img, dtboa.img, env_additions.json,
                 ce_flash.img.gz, ce_storage.img.gz, RebootToCoreELEC.apk,
                 script.coreelec.toolbox-*.zip
+  magisk/       {device}-init_boot-patched.img                  (place your Magisk-patched image here)
   blockgms/ blockota/ toolbox_export/   (Magisk modules)
   flash/        user-update.sh                              (CoreELEC OS-update self-heal hook)
   payload/remote/   99-xiaomi-remote.hwdb  xiaomi.xml       (remote button mapping)
