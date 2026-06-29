@@ -59,33 +59,41 @@ def su(serial, cmd):
     return r.stdout.decode("utf-8", "replace"), r.returncode
 
 
-# ---- stage_magisk: flash Magisk-patched init_boot_a via fastboot ---------------
+# ---- stage_magisk: install Magisk APK + flash patched init_boot_a via fastboot -
 def stage_magisk(a):
-    import time
-    print("== stage_magisk: flash Magisk-patched init_boot_a via fastboot ==")
+    import time, glob as _glob
+    print("== stage_magisk: install Magisk + flash patched init_boot_a ==")
 
-    # Locate the patched image: explicit arg > magisk/{device}-init_boot-patched.img >
-    #   artifacts/{device}-init_boot-patched.img > legacy fallbacks
+    magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
+
+    # ---- A. Install Magisk APK --------------------------------------------------
+    apks = sorted(_glob.glob(os.path.join(magisk_dir, "Magisk*.apk")) +
+                  _glob.glob(os.path.join(ART, "Magisk*.apk")))
+    if apks:
+        apk = apks[-1]
+        print(f"  installing {os.path.basename(apk)} ...")
+        r = adb(a.serial, "install", "-r", apk, capture_output=True)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+        if r.returncode == 0:
+            print("  Magisk APK installed OK")
+        else:
+            print(f"  WARNING: APK install failed: {out}")
+    else:
+        print("  (no Magisk*.apk found in magisk/ or artifacts/ -- skipping APK install)")
+
+    # ---- B. Locate the pre-patched init_boot image ------------------------------
     img = getattr(a, "magisk_img", None) or ""
     if not img:
-        # Auto-detect device name so the right file is picked when multiple devices
-        # exist in magisk/ (e.g. twilight-init_boot-patched.img vs other-device-...)
         r = subprocess.run(["adb", "-s", a.serial, "shell", "getprop", "ro.product.device"],
                            capture_output=True, text=True)
         device = r.stdout.strip()
         dev_name = f"{device}-init_boot-patched.img" if device else ""
-        magisk_dir = os.path.join(HERE, "..", "magisk")
         candidates = []
         if dev_name:
-            candidates += [
-                os.path.join(magisk_dir, dev_name),
-                os.path.join(ART, dev_name),
-            ]
-        # legacy: plain init_boot_patched.img in old locations
-        candidates += [
-            os.path.join(ART, "init_boot_patched.img"),
-            os.path.join(HERE, "..", "init_boot_patched.img"),
-        ]
+            candidates += [os.path.join(magisk_dir, dev_name),
+                           os.path.join(ART, dev_name)]
+        candidates += [os.path.join(ART, "init_boot_patched.img"),
+                       os.path.join(HERE, "..", "init_boot_patched.img")]
         for c in candidates:
             if os.path.exists(c):
                 img = os.path.abspath(c)
@@ -96,14 +104,13 @@ def stage_magisk(a):
         sys.exit(f"Patched init_boot image not found at: {img}\nPass --magisk-img <path>")
     print(f"  image: {img}  ({os.path.getsize(img):,} B)")
 
+    # ---- C. Reboot to fastboot and flash ----------------------------------------
     fs = getattr(a, "fastboot_serial", None) or ""
     fb = ["fastboot"] + (["-s", fs] if fs else [])
 
-    # Reboot into bootloader
     print(f"  rebooting {a.serial!r} into bootloader ...")
     adb(a.serial, "reboot", "bootloader")
 
-    # Wait for a fastboot device to appear
     print("  waiting for fastboot device (up to 60 s) ...")
     found = False
     for _ in range(60):
@@ -122,27 +129,31 @@ def stage_magisk(a):
         sys.exit("fastboot device did not appear within 60 s -- "
                  "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
 
-    # Flash init_boot_a
     print("  fastboot flash init_boot_a ...")
     r = subprocess.run(fb + ["flash", "init_boot_a", img])
     if r.returncode != 0:
         sys.exit("fastboot flash init_boot_a FAILED")
     print("  init_boot_a flashed OK")
 
-    # Reboot to Android
+    # ---- D. Reboot to Android and verify root -----------------------------------
     print("  rebooting to Android ...")
     subprocess.run(fb + ["reboot"])
 
-    # Wait for ADB to reconnect on the same serial
     print(f"  waiting for ADB {a.serial!r} to reconnect (up to 90 s) ...")
     for _ in range(90):
         r = subprocess.run(["adb", "-s", a.serial, "get-state"],
                            capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip() == "device":
-            print("  ADB reconnected. Magisk is now active.")
+            print("  ADB reconnected.")
+            time.sleep(5)  # let the system settle before checking root
+            root_out, _ = su(a.serial, "id")
+            if "uid=0" in root_out:
+                print("  Root verified: Magisk is active.")
+            else:
+                print("  Root not yet confirmed -- open the Magisk app to complete")
+                print("  any first-time setup, then verify: adb shell su -c id")
             return 0
         time.sleep(1)
-    # Flash succeeded but ADB didn't come back on the same serial.
     print("  init_boot_a flashed successfully.")
     print("  ADB did not reconnect on the same serial within 90 s.")
     if ":" in a.serial:

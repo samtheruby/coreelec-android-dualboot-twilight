@@ -51,7 +51,7 @@ def main():
     if os.path.isdir(DIST):
         shutil.rmtree(DIST)
     for sub in ("build", "installer", "artifacts", "blockota", "blockgms", "toolbox_export",
-                "flash", os.path.join("payload", "remote")):
+                "flash", "magisk", os.path.join("payload", "remote")):
         os.makedirs(os.path.join(DIST, sub))
 
     for f in BUILD_PY:
@@ -70,6 +70,13 @@ def main():
                      os.path.join(DIST, "payload", "remote", f))
     for f in FLASH:   # update-recovery hook -> dist/flash (deploy_flash_recovery.py fallback path)
         shutil.copy2(os.path.join(ROOT, "payload", "flash", f), os.path.join(DIST, "flash", f))
+    # magisk/: copy all files (APK + any pre-patched .img)
+    magisk_src = os.path.join(ROOT, "magisk")
+    for f in os.listdir(magisk_src):
+        src = os.path.join(magisk_src, f)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(DIST, "magisk", f))
+
     addon_zips = sorted(glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
     if not addon_zips:
         raise SystemExit(f"missing prebuilt addon zip ({ADDON_ZIP_GLOB}) in {ROOT}")
@@ -125,22 +132,20 @@ Prep on the stick: Developer options + ADB on, bootloader unlocked. Connect by *
 `--serial` entirely to auto-pick when just one device is attached. (USB is typically
 faster + more stable for the big stage-1 image streams.)
 
-## Stage_magisk -- flash Magisk-patched init_boot via fastboot (run before stage 0)
+## Stage_magisk -- install Magisk and flash patched init_boot (run before stage 0)
 If the stick is not yet rooted, use this step to get root before stage 0 requires it.
 
-1. Sideload the Magisk app: `adb install Magisk.apk`
-2. Get `init_boot.img` (from your OTA package, or push it via `adb push init_boot.img /sdcard/`)
-3. In Magisk: **Install → Select and patch a file**, pick `init_boot.img`
-4. Pull the patched file and place it next to `installer/` in this bundle folder:
-   ```
-   adb pull /sdcard/Download/magisk_patched-*.img init_boot_patched.img
-   ```
-5. Flash it (**USB must be connected** for the fastboot step):
-   ```
-   python installer/install.py stage_magisk --serial <ip:port>
-   ```
-   The installer reboots into the bootloader, flashes `init_boot_a`, and reboots back to Android.
-   Verify: `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
+With **USB connected** (required for the fastboot flash), run:
+```
+python installer/install.py stage_magisk --serial <ip:port>
+```
+The script automatically:
+1. Installs the bundled Magisk APK via adb
+2. Reboots into the bootloader and flashes the pre-patched `init_boot_a`
+3. Reboots back to Android and verifies root
+
+If root is not immediately confirmed, open the Magisk app to complete any first-time setup,
+then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
 
 ## Stage 0 -- preflight + backups (read-only)
 ```

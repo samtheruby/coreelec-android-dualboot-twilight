@@ -80,20 +80,13 @@ adb devices            # confirm your stick is listed (USB id or ip:port)
 **3. Root the stick with Magisk (skip if already rooted)**
 Skip if `adb shell su -c id` already returns `uid=0`.
 
-- Install the Magisk app: `adb -s <ip:port> install Magisk.apk`
-- Get `init_boot.img` — from your OTA package, or push via `adb push init_boot.img /sdcard/`
-- In Magisk: **Install → Select and patch a file**, pick `init_boot.img`
-- Pull the result into the bundle's `magisk/` folder with the device-prefixed name:
-  ```
-  adb pull /sdcard/Download/magisk_patched-*.img magisk/twilight-init_boot-patched.img
-  ```
-- Flash it (USB must be connected for fastboot):
-  ```
-  python installer/install.py stage_magisk --serial <ip:port>
-  ```
-  The installer auto-detects the device name, picks `magisk/twilight-init_boot-patched.img`,
-  reboots into the bootloader, flashes `init_boot_a`, and reboots back.
-  Verify root: `adb shell su -c id` → `uid=0`.
+With **USB connected** (required for the fastboot flash step), run:
+```
+python installer/install.py stage_magisk --serial <ip:port>
+```
+The script installs the bundled Magisk APK, reboots into the bootloader, flashes the
+pre-patched `init_boot_a`, and reboots back to Android. If root is not immediately confirmed,
+open the Magisk app to complete first-time setup, then verify: `adb shell su -c id` → `uid=0`.
 
 **4. Back up + preflight (safe, no changes)**
 ```
