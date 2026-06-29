@@ -110,22 +110,28 @@ adb -s <ip:port> reboot
 - Let the recovery wipe + Android first-time setup finish (it reboots itself once). Walk through setup, re-enable USB/Network debugging.
 - `adb connect <ip:port>` again (the address may change).
 
-**7. Apps + modules**
+**7. Re-install Magisk APK (stage 1's factory reset wiped it)**
+```
+python installer/install.py stage1b --serial <ip:port>
+```
+The factory reset wipes `/data` including the Magisk APK and its root-grant database. `init_boot_a` is still patched so no fastboot is needed — this just re-installs the APK. When prompted, open the **Magisk app** on the stick, complete first-time setup, and **approve the root-access dialog** for ADB shell. The script waits up to 120 s for `uid=0` confirmation, then prints the stage 2 command.
+
+**8. Apps + modules**
 ```
 python installer/install.py stage2 --serial <ip:port>
 ```
-Re-applies the u-boot boot gate (stage 1's factory reset clears it), then installs the **Reboot to CoreELEC** app, the OS-update self-heal files, and the modules that keep updates from clobbering CoreELEC. **Don't try CoreELEC before stage 2** — without this step the switcher can't enter it. Reboot after this stage with adb -s <ip:port> reboot only if you are not running stage2a.
+Re-applies the u-boot boot gate (stage 1's factory reset clears it), then installs the **Reboot to CoreELEC** app, the OS-update self-heal files, and the modules that keep updates from clobbering CoreELEC. **Don't try CoreELEC before stage 2** — without this step the switcher can't enter it. Reboot after this stage with `adb -s <ip:port> reboot` only if you are not running stage2a.
 
-**8. (Optional) Block the Xiaomi updater too**
+**9. (Optional) Block the Xiaomi updater too**
 ```
 python installer/install.py stage2a --serial <ip:port>
 adb -s <ip:port> reboot
 ```
 
-**9. Boot into CoreELEC**
+**10. Boot into CoreELEC**
 - After the reboot, open the **Reboot to CoreELEC** app on the stick and reboot into CoreELEC.
 
-**10. Finish CoreELEC setup**
+**11. Finish CoreELEC setup**
 ```
 python installer/install.py stage3 --host <coreelec-ip>
 ```
@@ -144,7 +150,7 @@ The install has **two phases**, distinguished by how the PC talks to the stick:
 | phase | device booted in | transport | stages |
 |---|---|---|---|
 | **Pre-install** | Android (Google TV) | `adb` + USB fastboot | stage_magisk |
-| **Android** | Android (Google TV) | `adb` / `--serial <ip:port>` | stage0, stage1, stage2, stage2a, verify |
+| **Android** | Android (Google TV) | `adb` / `--serial <ip:port>` | stage0, stage1, stage1b, stage2, stage2a, verify |
 | **CoreELEC** | CoreELEC (after first CE boot) | `ssh` / `--host <ip>` | stage3 |
 
 Run everything through `partB-installer/installer/install.py`. Each stage is also runnable
@@ -187,6 +193,15 @@ regions is SHA-256 verified after writing.** Finally it arms the bootloader cont
 now-smaller userdata to its new size, re-keys encryption, and boots Android → first-time setup
 once. (A plain superblock wipe is undone by a clean reboot's cached-superblock writeback; the BCB
 recovery wipe is the deterministic path.) Reconnect adb afterward.
+
+### Stage 1b — re-install Magisk APK (after the stage 1 factory reset)
+```
+python installer/install.py stage1b --serial <ip:port>
+```
+The stage 1 factory reset wipes `/data`, removing the Magisk APK and its root-grant database.
+`init_boot_a` is still patched so no fastboot is needed — only the APK needs re-installing.
+Open the **Magisk app** on the stick when prompted, complete first-time setup, and approve the
+ADB root grant. The script waits up to 120 s for `uid=0` before printing the stage 2 command.
 
 ### Stage 2 — apps + modules (Android side)
 ```

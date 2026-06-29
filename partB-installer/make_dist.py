@@ -84,11 +84,18 @@ def main():
     for f in ART_RAW:
         shutil.copy2(os.path.join(ART, f), os.path.join(DIST, "artifacts", f))
     for f in ART_GZ:
-        print(f"  gzip {f} ...", end="", flush=True)
-        gzip_to(os.path.join(ART, f), os.path.join(DIST, "artifacts", f + ".gz"))
-        print(f" {os.path.getsize(os.path.join(DIST, 'artifacts', f + '.gz'))//1048576} MiB")
+        dst = os.path.join(DIST, "artifacts", f + ".gz")
+        src_gz = os.path.join(ART, f + ".gz")
+        src_raw = os.path.join(ART, f)
+        if os.path.exists(src_gz):
+            print(f"  copy {f}.gz ...", end="", flush=True)
+            shutil.copy2(src_gz, dst)
+        else:
+            print(f"  gzip {f} ...", end="", flush=True)
+            gzip_to(src_raw, dst)
+        print(f" {os.path.getsize(dst)//1048576} MiB")
 
-    open(os.path.join(DIST, "INSTALL.md"), "w", newline="\n").write(INSTALL_MD)
+    open(os.path.join(DIST, "INSTALL.md"), "w", newline="\n", encoding="utf-8").write(INSTALL_MD)
 
     # SHA256SUMS
     lines = []
