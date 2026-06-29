@@ -64,10 +64,25 @@ def stage_magisk(a):
     import time
     print("== stage_magisk: flash Magisk-patched init_boot_a via fastboot ==")
 
-    # Locate the patched image: explicit arg > artifacts/ > bundle root
+    # Locate the patched image: explicit arg > magisk/{device}-init_boot-patched.img >
+    #   artifacts/{device}-init_boot-patched.img > legacy fallbacks
     img = getattr(a, "magisk_img", None) or ""
     if not img:
-        candidates = [
+        # Auto-detect device name so the right file is picked when multiple devices
+        # exist in magisk/ (e.g. twilight-init_boot-patched.img vs other-device-...)
+        r = subprocess.run(["adb", "-s", a.serial, "shell", "getprop", "ro.product.device"],
+                           capture_output=True, text=True)
+        device = r.stdout.strip()
+        dev_name = f"{device}-init_boot-patched.img" if device else ""
+        magisk_dir = os.path.join(HERE, "..", "magisk")
+        candidates = []
+        if dev_name:
+            candidates += [
+                os.path.join(magisk_dir, dev_name),
+                os.path.join(ART, dev_name),
+            ]
+        # legacy: plain init_boot_patched.img in old locations
+        candidates += [
             os.path.join(ART, "init_boot_patched.img"),
             os.path.join(HERE, "..", "init_boot_patched.img"),
         ]
@@ -78,7 +93,7 @@ def stage_magisk(a):
     if not img:
         return None  # signal to caller: no image found, skip
     if not os.path.exists(img):
-        sys.exit(f"init_boot_patched.img not found at: {img}\nPass --magisk-img <path>")
+        sys.exit(f"Patched init_boot image not found at: {img}\nPass --magisk-img <path>")
     print(f"  image: {img}  ({os.path.getsize(img):,} B)")
 
     fs = getattr(a, "fastboot_serial", None) or ""

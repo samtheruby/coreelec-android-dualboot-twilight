@@ -119,11 +119,28 @@ Self-contained. Needs only **Python 3** + **adb** and a **stock, rooted, unlocke
 > pre-flight refuses non-stock / already-modified units. Stage 2's app + GMS block
 > are generic to Google/Android TV; stage 2a is Xiaomi-only.
 
-Prep on the stick: Developer options + ADB on, root (Magisk). Then connect by **USB**
+Prep on the stick: Developer options + ADB on, bootloader unlocked. Connect by **USB**
 (plug in, authorize the prompt) **or wireless** (`adb connect <ip>:<port>`); confirm
 `adb devices`. Every `--serial` below takes either a **USB id or `ip:port`** -- or omit
 `--serial` entirely to auto-pick when just one device is attached. (USB is typically
 faster + more stable for the big stage-1 image streams.)
+
+## Stage_magisk -- flash Magisk-patched init_boot via fastboot (run before stage 0)
+If the stick is not yet rooted, use this step to get root before stage 0 requires it.
+
+1. Sideload the Magisk app: `adb install Magisk.apk`
+2. Get `init_boot.img` (from your OTA package, or push it via `adb push init_boot.img /sdcard/`)
+3. In Magisk: **Install → Select and patch a file**, pick `init_boot.img`
+4. Pull the patched file and place it next to `installer/` in this bundle folder:
+   ```
+   adb pull /sdcard/Download/magisk_patched-*.img init_boot_patched.img
+   ```
+5. Flash it (**USB must be connected** for the fastboot step):
+   ```
+   python installer/install.py stage_magisk --serial <ip:port>
+   ```
+   The installer reboots into the bootloader, flashes `init_boot_a`, and reboots back to Android.
+   Verify: `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
 
 ## Stage 0 -- preflight + backups (read-only)
 ```

@@ -18,10 +18,24 @@
 # + remote payload), drop generated artifacts, device backups, build junk.
 # =====================================================================
 
-# Generated artifacts — rebuilt by build/build_all.py from a CoreELEC img.
-partB-installer/artifacts/
+# Generated artifacts — most rebuilt by build/build_all.py from a CoreELEC img.
+# Small prebuilt artifacts are committed so the installer bundle is usable from
+# source without a full build. Large CE images (ce_flash, boota) are release-only.
+# Use /* (not /) so that file-level re-inclusions below are honoured by git.
+partB-installer/artifacts/*
+!partB-installer/artifacts/gpt_primary.bin
+!partB-installer/artifacts/gpt_backup.bin
+!partB-installer/artifacts/dtboa.img
+!partB-installer/artifacts/ce_storage.img.gz
+!partB-installer/artifacts/env_additions.json
+!partB-installer/artifacts/RebootToCoreELEC.apk
+!partB-installer/artifacts/script.coreelec.toolbox-*.zip
 partB-installer/dist/
 partB-installer/*.zip
+
+# magisk/: device-specific Magisk-patched init_boot images (*.img gitignored;
+# the README explaining the naming convention IS tracked).
+partB-installer/magisk/*.img
 
 # Device-pulled backups — CONTAIN PER-DEVICE IDENTITY. Never publish.
 partB-installer/pulled_backups/
