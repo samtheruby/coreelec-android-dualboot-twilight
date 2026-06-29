@@ -162,14 +162,27 @@ Writes GPT + CE_FLASH/CE_STORAGE + kernel/dtb + misc + env; every region is SHA-
 verified. Then it **arms the bootloader control block** (`misc`: `boot-recovery` +
 `--wipe_data`). The reboot therefore enters **recovery**, which reformats the shrunk
 userdata to its new size and re-keys encryption (factory-reset-like, one-time), then
-boots Android first-boot setup. Let the wipe + setup finish, then reconnect adb. (That
-reset also clears the u-boot env gate -- **stage 2 re-applies it**, so always run stage 2
-before trying to boot CoreELEC.)
+boots Android first-boot setup. Let the wipe + setup finish, then reconnect adb and
+run **stage 1b** before stage 2. (The reset also clears the u-boot env gate --
+**stage 2 re-applies it**, so always run stage 2 before trying to boot CoreELEC.)
 
 > Why the BCB and not just a superblock wipe: a clean `adb reboot` makes Android flush
 > the cached original superblock back over the wipe, so the reformat never fires and
 > `/data` is left oversized on the smaller partition. The BCB recovery wipe is the
 > deterministic path (same one `fastboot -w` / OTA use).
+
+## Stage 1b -- re-install Magisk APK (after the stage 1 factory reset)
+```
+python installer/install.py stage1b --serial <ip:port>
+```
+The stage 1 factory reset wipes `/data`, which removes the Magisk APK and its
+root-grant database. `init_boot_a` is **still patched** (that partition is untouched),
+so no fastboot is needed -- only the APK needs to be re-installed.
+
+The script installs the APK, then waits up to 120 s for root confirmation. During that
+window: open the **Magisk app** on the device, complete any first-time setup, and
+**approve the root-access dialog** for ADB shell. Once `uid=0` is confirmed the script
+prints the stage 2 command and exits.
 
 ## Stage 2 -- apps + modules  (Android side)
 ```

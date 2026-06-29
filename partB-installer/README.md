@@ -55,7 +55,7 @@ partB-installer/
     flash/               kernel.img, SYSTEM(+md5), dtb.img, dovi.ko, cfgload, user-update.sh ...
     remote/              99-xiaomi-remote.hwdb, xiaomi.xml  (remote keymap, committed)
   installer/
-    install.py           staged orchestrator (stage_magisk/stage0/1/2/2a/stage3/verify) -- the entry point
+    install.py           staged orchestrator (stage_magisk/stage0/1/1b/2/2a/stage3/verify) -- the entry point
     flash_to_coreelec.py core engine: preflight, per-unit env/misc, PC-side backups,
                          STREAMED writes (nc-over-adb-forward tunnel), verify; --dry-run
     deploy_*.py          stage3 CoreELEC-side: toolbox addon, Kodi sources, remote keymap
@@ -123,10 +123,14 @@ USB must be connected for the fastboot step. After this, `su` works and stage 0 
 
 ```
 # dry run first (no device writes; prepares per-unit blobs, prints the write plan)
-python installer/flash_to_coreelec.py --serial <ip:port> --dry-run
+python installer/install.py stage1 --serial <ip:port>
 
 # real install
-python installer/flash_to_coreelec.py --serial <ip:port> --yes
+python installer/install.py stage1 --serial <ip:port> --yes
+adb -s <ip:port> reboot
+# [wait for recovery reformat + Android first-boot setup, re-enable ADB]
+python installer/install.py stage1b --serial <ip:port>   # re-install Magisk APK post factory-reset
+python installer/install.py stage2  --serial <ip:port>   # after root confirmed
 ```
 
 Pre-flight refuses anything that isn't a stock, rooted, unlocked, unmodified
@@ -216,7 +220,8 @@ works on a unit other than the dev unit:
 
 Getting here surfaced four ordering bugs, each fixed (v1.0.1 deterministic userdata
 reformat → v1.0.2 stage-2 re-gate → v1.0.3 no re-gate loop → v1.0.4 Kodi auto-config →
-v1.0.7 `stage_magisk` pre-stage for Magisk root via fastboot).
+v1.0.7 `stage_magisk` pre-stage for Magisk root via fastboot + `stage1b` to re-install
+Magisk APK after the factory reset wipes `/data`).
 Only a soft/hard factory-reset *from* the installed state is still untested (low stakes:
 re-run stage 2 to re-gate).
 

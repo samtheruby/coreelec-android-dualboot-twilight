@@ -168,6 +168,41 @@ def stage0(a):
     return run("flash_to_coreelec.py", "--serial", a.serial, "--dry-run")
 
 
+# ---- stage 1b: re-install Magisk APK after the stage1 factory reset ---------
+def stage1b(a):
+    import time, glob as _glob
+    print("== stage1b: re-install Magisk APK (factory reset wiped userdata) ==")
+    print("  (init_boot_a is still patched -- no fastboot needed)")
+
+    magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
+    apks = sorted(_glob.glob(os.path.join(magisk_dir, "Magisk*.apk")) +
+                  _glob.glob(os.path.join(ART, "Magisk*.apk")))
+    if not apks:
+        sys.exit("no Magisk*.apk found in magisk/ or artifacts/")
+    apk = apks[-1]
+    print(f"  installing {os.path.basename(apk)} ...")
+    r = adb(a.serial, "install", "-r", apk, capture_output=True)
+    out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+    if r.returncode != 0:
+        sys.exit(f"  APK install failed: {out}")
+    print("  Magisk APK installed OK")
+    print("  Open the Magisk app on the device and complete first-time setup,")
+    print("  then approve the root-access dialog for ADB shell.")
+    print("  Waiting for root (up to 120 s -- tap Allow on device when prompted) ...")
+    for _ in range(120):
+        root_out, _ = su(a.serial, "id")
+        if "uid=0" in root_out:
+            print("  Root verified: Magisk is active.")
+            print("\nstage1b done. Run stage2 now:")
+            print(f"  python install.py stage2 --serial {a.serial}")
+            return 0
+        time.sleep(1)
+    print("  Root not confirmed within 120 s.")
+    print("  Verify manually:  adb shell su -c id")
+    print("  Then run:         python install.py stage2")
+    return 0
+
+
 # ---- stage 1: core destructive install ---------------------------------------
 def stage1(a):
     print("== stage1: CORE install (destructive) ==")
@@ -176,9 +211,10 @@ def stage1(a):
     if rc == 0 and a.yes:
         print("\nstage1 done. The NEXT reboot enters recovery and reformats userdata")
         print("(factory-reset-like) to the new size, then boots Android. Reboot now,")
-        print("let it finish the wipe + Android first-boot setup, re-enable ADB, then stage2:")
+        print("let it finish the wipe + Android first-boot setup, re-enable ADB, then:")
         print(f"  adb -s {a.serial} reboot")
-        print(f"  python install.py stage2 --serial <new ip:port>")
+        print(f"  python install.py stage1b --serial <new ip:port>   # re-install Magisk APK")
+        print(f"  python install.py stage2  --serial <new ip:port>   # after root confirmed")
     return rc
 
 
@@ -268,7 +304,7 @@ def verify(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["stage_magisk", "stage0", "stage1", "stage2", "stage2a",
+    ap.add_argument("stage", choices=["stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a",
                                       "stage3", "verify", "all"])
     ap.add_argument("--serial", help="adb serial for the Android stages (ip:port or USB id); "
                     "omit to auto-pick the only attached device")
@@ -288,7 +324,7 @@ def main():
                     help="stage_magisk: fastboot device serial (auto-detected if omitted)")
     a = ap.parse_args()
 
-    if a.stage in {"stage_magisk", "stage0", "stage1", "stage2", "stage2a", "verify", "all"}:
+    if a.stage in {"stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
         import adb_serial
         a.serial = adb_serial.resolve(a.serial)
 
@@ -302,7 +338,7 @@ def main():
         stage0(a)
         sys.exit(stage1(a))
     sys.exit({"stage_magisk": stage_magisk, "stage0": stage0, "stage1": stage1,
-              "stage2": stage2, "stage2a": stage2a,
+              "stage1b": stage1b, "stage2": stage2, "stage2a": stage2a,
               "stage3": stage3, "verify": verify}[a.stage](a))
 
 
