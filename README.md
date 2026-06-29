@@ -46,10 +46,11 @@ Android stays the default; CoreELEC is one tap away (or make CoreELEC the defaul
   the unzipped folder. **No WSL, no build step, no CoreELEC download required.**
   (To assemble the bundle yourself, see [Build from source](#build-from-source).)
 
-**The stick (stock, rooted):**
+**The stick:**
 - Developer options on → **USB debugging** + **Network debugging** (ADB)
-- **Root** (Magisk) — these units are rootable; `su` must work
-- Bootloader unlocked (ships unlockable)
+- Bootloader unlocked (ships unlockable; required for Magisk)
+- **Root** (Magisk) — `su` must work before stage 0. If not yet rooted, the
+  `stage_magisk` step (step 3 below) handles it via fastboot.
 
 Connect by **USB** (plug in, authorize the prompt) or **wireless** (`adb connect <stick-ip>:<port>`),
 then confirm `adb devices` shows it. Every `--serial` below accepts a **USB id or `ip:port`** — or
@@ -64,7 +65,7 @@ Follow these in order. `<ip:port>` is your stick's ADB address (e.g. `192.168.1.
 unzipped bundle folder (the one that contains the `installer/` folder).
 
 **1. Get ready**
-- On the stick: enable **Developer options → USB debugging + Network debugging**, make sure it's **rooted** with Magisk - Instructions can be found here: https://4pda.to/forum/index.php?showtopic=1107499&st=540#entry138479699
+- On the stick: enable **Developer options → USB debugging + Network debugging**
 - On the PC: install **Python 3** and **adb**, then `pip install paramiko`.
 - Download `partB-installer-dist.zip` from the [latest Release](../../releases/latest) and unzip it.
 
@@ -76,13 +77,30 @@ adb devices            # confirm your stick is listed (USB id or ip:port)
 > In every command below you can drop `--serial <…>` when only one device is attached (it
 > auto-detects), or pass the **USB id** instead of `ip:port`. USB is faster/steadier for stage 1.
 
-**3. Back up + preflight (safe, no changes)**
+**3. Root the stick with Magisk (skip if already rooted)**
+Skip if `adb shell su -c id` already returns `uid=0`.
+
+- Install the Magisk app: `adb -s <ip:port> install Magisk.apk`
+- Get `init_boot.img` — from your OTA package, or push via `adb push init_boot.img /sdcard/`
+- In Magisk: **Install → Select and patch a file**, pick `init_boot.img`
+- Pull the result and place it in the bundle folder (next to `installer/`):
+  ```
+  adb pull /sdcard/Download/magisk_patched-*.img init_boot_patched.img
+  ```
+- Flash it (USB must be connected for fastboot):
+  ```
+  python installer/install.py stage_magisk --serial <ip:port>
+  ```
+  The installer reboots into the bootloader, flashes `init_boot_a`, and reboots back.
+  Verify root: `adb shell su -c id` → `uid=0`.
+
+**4. Back up + preflight (safe, no changes)**
 ```
 python installer/install.py stage0 --serial <ip:port>
 ```
 Saves a full backup of every region to `pulled_backups/` and refuses to go on unless the stick is a clean, stock, rooted `twilight`. **Don't skip this** — it's what `restore` uses later.
 
-**4. Install — ⚠️ THIS WIPES ANDROID USER DATA**
+**5. Install — ⚠️ THIS WIPES ANDROID USER DATA**
 Start with a dry run -
 ```
 python installer/install.py stage1 --serial <ip:port>
@@ -94,26 +112,26 @@ adb -s <ip:port> reboot
 ```
 > This step writes the new partition layout + CoreELEC. Every region is SHA-256 verified, then a recovery wipe is armed. On `reboot` the stick enters **recovery**, reformats its (now smaller) storage one time, and boots Android. (Leave off `--yes` to do a dry run that only prints the plan.)
 
-**5. Re-setup Android, then reconnect**
+**6. Re-setup Android, then reconnect**
 - Let the recovery wipe + Android first-time setup finish (it reboots itself once). Walk through setup, re-enable USB/Network debugging.
 - `adb connect <ip:port>` again (the address may change).
 
-**6. Apps + modules**
+**7. Apps + modules**
 ```
 python installer/install.py stage2 --serial <ip:port>
 ```
 Re-applies the u-boot boot gate (stage 1's factory reset clears it), then installs the **Reboot to CoreELEC** app, the OS-update self-heal files, and the modules that keep updates from clobbering CoreELEC. **Don't try CoreELEC before stage 2** — without this step the switcher can't enter it. Reboot after this stage with adb -s <ip:port> reboot only if you are not running stage2a.
 
-**7. (Optional) Block the Xiaomi updater too**
+**8. (Optional) Block the Xiaomi updater too**
 ```
 python installer/install.py stage2a --serial <ip:port>
 adb -s <ip:port> reboot
 ```
 
-**8. Boot into CoreELEC**
+**9. Boot into CoreELEC**
 - After the reboot, open the **Reboot to CoreELEC** app on the stick and reboot into CoreELEC.
 
-**9. Finish CoreELEC setup**
+**10. Finish CoreELEC setup**
 ```
 python installer/install.py stage3 --host <coreelec-ip>
 ```
@@ -131,6 +149,7 @@ The install has **two phases**, distinguished by how the PC talks to the stick:
 
 | phase | device booted in | transport | stages |
 |---|---|---|---|
+| **Pre-install** | Android (Google TV) | `adb` + USB fastboot | stage_magisk |
 | **Android** | Android (Google TV) | `adb` / `--serial <ip:port>` | stage0, stage1, stage2, stage2a, verify |
 | **CoreELEC** | CoreELEC (after first CE boot) | `ssh` / `--host <ip>` | stage3 |
 
@@ -138,6 +157,17 @@ Run everything through `partB-installer/installer/install.py`. Each stage is als
 standalone.
 
 ---
+
+### Stage_magisk — flash Magisk-patched init_boot via fastboot (pre-stage 0)
+```
+python installer/install.py stage_magisk --serial <ip:port>
+```
+Reboots the stick into the fastboot bootloader, flashes `init_boot_a` with the Magisk-patched image
+(`init_boot_patched.img` — auto-found in `artifacts/` or the bundle root, or pass `--magisk-img <path>`),
+then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone isn't enough for the
+bootloader flash). Use `--fastboot-serial <serial>` if multiple fastboot devices are connected.
+
+Only needed once per unit. If root is already active, skip it.
 
 ### Stage 0 — preflight + backups (read-only)
 ```

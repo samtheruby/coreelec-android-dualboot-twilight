@@ -55,7 +55,7 @@ partB-installer/
     flash/               kernel.img, SYSTEM(+md5), dtb.img, dovi.ko, cfgload, user-update.sh ...
     remote/              99-xiaomi-remote.hwdb, xiaomi.xml  (remote keymap, committed)
   installer/
-    install.py           staged orchestrator (stage0/1/2/2a/stage3/verify) -- the entry point
+    install.py           staged orchestrator (stage_magisk/stage0/1/2/2a/stage3/verify) -- the entry point
     flash_to_coreelec.py core engine: preflight, per-unit env/misc, PC-side backups,
                          STREAMED writes (nc-over-adb-forward tunnel), verify; --dry-run
     deploy_*.py          stage3 CoreELEC-side: toolbox addon, Kodi sources, remote keymap
@@ -112,6 +112,14 @@ no per-device dump is ever baked into an artifact.
 
 > `--serial` takes a **USB id or `ip:port`** (the scripts just pass it to `adb -s`; USB and
 > wireless behave identically). Omit `--serial` to auto-pick when only one device is attached.
+
+**Root first (if not already):** place the Magisk-patched `init_boot.img` as
+`init_boot_patched.img` in the bundle root (next to `installer/`), then:
+```
+python installer/install.py stage_magisk --serial <ip:port>
+```
+Reboots into the fastboot bootloader, flashes `init_boot_a`, and reboots back to Android.
+USB must be connected for the fastboot step. After this, `su` works and stage 0 proceeds.
 
 ```
 # dry run first (no device writes; prepares per-unit blobs, prints the write plan)
@@ -207,7 +215,8 @@ works on a unit other than the dev unit:
   kept the dual-boot alive** (kernel/dtb re-synced + env gate restored).
 
 Getting here surfaced four ordering bugs, each fixed (v1.0.1 deterministic userdata
-reformat → v1.0.2 stage-2 re-gate → v1.0.3 no re-gate loop → v1.0.4 Kodi auto-config).
+reformat → v1.0.2 stage-2 re-gate → v1.0.3 no re-gate loop → v1.0.4 Kodi auto-config →
+v1.0.7 `stage_magisk` pre-stage for Magisk root via fastboot).
 Only a soft/hard factory-reset *from* the installed state is still untested (low stakes:
 re-run stage 2 to re-gate).
 

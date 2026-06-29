@@ -7,6 +7,9 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
 [generic]=any Google TV / CoreELEC box.
 
   ANDROID phase (--serial):
+    stage_magisk  flash Magisk-patched init_boot_a via fastboot  [Xiaomi]
+                   run BEFORE stage0 -- gives root that stage0 requires.
+                   Reboots to bootloader, flashes, reboots back to Android.
     stage0  preflight + PC-side backups      [Xiaomi]   read-only + pull
     stage1  CORE install -> first reboot     [Xiaomi]   GPT/CE/kernel/dtb/misc/env
                                                          + arm userdata reformat  DESTRUCTIVE
@@ -26,11 +29,13 @@ The [generic] stage3 pieces (Toolbox addon, Kodi sources) also run standalone on
 any CoreELEC box -- see deploy_toolbox_addon.py / deploy_kodi_sources.py.
 
 Usage:
+  python install.py stage_magisk --serial <ip:port>              # auto-find init_boot_patched.img
+  python install.py stage_magisk --serial <ip:port> --magisk-img <path>
   python install.py stage1  --serial <ip:port> --yes
   python install.py stage2  --serial <ip:port>
   python install.py stage2a --serial <ip:port>
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
-  python install.py all     --serial <ip:port> --yes      # stage0+stage1, guides the rest
+  python install.py all     --serial <ip:port> --yes      # stage_magisk+stage0+stage1, guides the rest
 """
 import argparse, os, subprocess, sys
 
@@ -52,6 +57,83 @@ def su(serial, cmd):
     r = subprocess.run(["adb", "-s", serial, "exec-out", "su -c '" + cmd.replace("'", "'\\''") + "'"],
                        capture_output=True)
     return r.stdout.decode("utf-8", "replace"), r.returncode
+
+
+# ---- stage_magisk: flash Magisk-patched init_boot_a via fastboot ---------------
+def stage_magisk(a):
+    import time
+    print("== stage_magisk: flash Magisk-patched init_boot_a via fastboot ==")
+
+    # Locate the patched image: explicit arg > artifacts/ > bundle root
+    img = getattr(a, "magisk_img", None) or ""
+    if not img:
+        candidates = [
+            os.path.join(ART, "init_boot_patched.img"),
+            os.path.join(HERE, "..", "init_boot_patched.img"),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                img = os.path.abspath(c)
+                break
+    if not img:
+        return None  # signal to caller: no image found, skip
+    if not os.path.exists(img):
+        sys.exit(f"init_boot_patched.img not found at: {img}\nPass --magisk-img <path>")
+    print(f"  image: {img}  ({os.path.getsize(img):,} B)")
+
+    fs = getattr(a, "fastboot_serial", None) or ""
+    fb = ["fastboot"] + (["-s", fs] if fs else [])
+
+    # Reboot into bootloader
+    print(f"  rebooting {a.serial!r} into bootloader ...")
+    adb(a.serial, "reboot", "bootloader")
+
+    # Wait for a fastboot device to appear
+    print("  waiting for fastboot device (up to 60 s) ...")
+    found = False
+    for _ in range(60):
+        try:
+            r = subprocess.run(fb + ["devices"], capture_output=True, text=True)
+        except FileNotFoundError:
+            sys.exit("fastboot not found on PATH -- install Android platform-tools")
+        devlines = [l for l in r.stdout.splitlines()
+                    if l.strip() and not l.startswith("List")]
+        if devlines:
+            print(f"  fastboot: {devlines[0].strip()}")
+            found = True
+            break
+        time.sleep(1)
+    if not found:
+        sys.exit("fastboot device did not appear within 60 s -- "
+                 "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
+
+    # Flash init_boot_a
+    print("  fastboot flash init_boot_a ...")
+    r = subprocess.run(fb + ["flash", "init_boot_a", img])
+    if r.returncode != 0:
+        sys.exit("fastboot flash init_boot_a FAILED")
+    print("  init_boot_a flashed OK")
+
+    # Reboot to Android
+    print("  rebooting to Android ...")
+    subprocess.run(fb + ["reboot"])
+
+    # Wait for ADB to reconnect on the same serial
+    print(f"  waiting for ADB {a.serial!r} to reconnect (up to 90 s) ...")
+    for _ in range(90):
+        r = subprocess.run(["adb", "-s", a.serial, "get-state"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip() == "device":
+            print("  ADB reconnected. Magisk is now active.")
+            return 0
+        time.sleep(1)
+    # Flash succeeded but ADB didn't come back on the same serial.
+    print("  init_boot_a flashed successfully.")
+    print("  ADB did not reconnect on the same serial within 90 s.")
+    if ":" in a.serial:
+        print("  Device rebooted -- reconnect with: adb connect <ip:port>")
+    print("  Then continue: python install.py stage0 --serial <serial>")
+    sys.exit(0)
 
 
 # ---- stage 0: preflight + backups (flash_to_coreelec dry-run does both) -------
@@ -160,7 +242,7 @@ def verify(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["stage0", "stage1", "stage2", "stage2a",
+    ap.add_argument("stage", choices=["stage_magisk", "stage0", "stage1", "stage2", "stage2a",
                                       "stage3", "verify", "all"])
     ap.add_argument("--serial", help="adb serial for the Android stages (ip:port or USB id); "
                     "omit to auto-pick the only attached device")
@@ -173,19 +255,28 @@ def main():
                     help="stage3: force the Xiaomi remote keymap (skip auto-detect)")
     ap.add_argument("--no-keymap", dest="no_keymap", action="store_true",
                     help="stage3: skip the Xiaomi remote keymap (generic CoreELEC box)")
+    ap.add_argument("--magisk-img", dest="magisk_img", default="",
+                    help="stage_magisk: path to Magisk-patched init_boot image "
+                         "(auto-found if init_boot_patched.img is in artifacts/ or bundle root)")
+    ap.add_argument("--fastboot-serial", dest="fastboot_serial", default="",
+                    help="stage_magisk: fastboot device serial (auto-detected if omitted)")
     a = ap.parse_args()
 
-    if a.stage in {"stage0", "stage1", "stage2", "stage2a", "verify", "all"}:
+    if a.stage in {"stage_magisk", "stage0", "stage1", "stage2", "stage2a", "verify", "all"}:
         import adb_serial
         a.serial = adb_serial.resolve(a.serial)
 
     if a.stage == "all":
-        print("Running stage0 + stage1. After stage1 reboot into Android and re-run:")
+        print("Running stage_magisk (if image found) + stage0 + stage1.")
+        print("After stage1 reboot into Android and re-run:")
         print("  python install.py stage2 --serial <ip:port>     (then stage2a optional)")
         print("Then boot CoreELEC and:  python install.py stage3 --host <coreelec-ip>")
+        if stage_magisk(a) is None:
+            print("  (stage_magisk skipped: no init_boot_patched.img found in artifacts/ or bundle root)")
         stage0(a)
         sys.exit(stage1(a))
-    sys.exit({"stage0": stage0, "stage1": stage1, "stage2": stage2, "stage2a": stage2a,
+    sys.exit({"stage_magisk": stage_magisk, "stage0": stage0, "stage1": stage1,
+              "stage2": stage2, "stage2a": stage2a,
               "stage3": stage3, "verify": verify}[a.stage](a))
 
 
