@@ -28,6 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON_ID = "script.coreelec.toolbox"
 ADDONS_DIR = "/storage/.kodi/addons"
 GUISETTINGS = "/storage/.kodi/userdata/guisettings.xml"
+WEB_USER = "kodi"          # Kodi web server username is always "kodi"
+WEB_PASS = "kodi"          # default; Kodi 18+ requires a non-empty password. Override --webpass
 
 
 def find_zip():
@@ -41,31 +43,31 @@ def find_zip():
     return None
 
 
-def rpc(sh, method, params=None):
+def rpc(sh, method, params=None, pw=WEB_PASS):
     """One JSON-RPC call to the local Kodi web server (curl on the device). The JSON
     has only double quotes, so single-quoting it for the shell is safe."""
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
                           "params": params or {}})
-    return sh("curl -s -m 8 --user kodi: -H 'Content-Type: application/json' "
+    return sh(f"curl -s -m 8 --user {WEB_USER}:{pw} -H 'Content-Type: application/json' "
               f"--data '{payload}' http://127.0.0.1:8080/jsonrpc")
 
 
-def ping(sh):
-    return '"result":"pong"' in rpc(sh, "JSONRPC.Ping").replace(" ", "")
+def ping(sh, pw=WEB_PASS):
+    return '"result":"pong"' in rpc(sh, "JSONRPC.Ping", pw=pw).replace(" ", "")
 
 
-def wait_ping(sh, secs=45):
+def wait_ping(sh, pw=WEB_PASS, secs=45):
     for _ in range(secs):
         time.sleep(1)
-        if ping(sh):
+        if ping(sh, pw=pw):
             return True
     return False
 
 
-def patch_guisettings(cli):
+def patch_guisettings(cli, web_pass=WEB_PASS):
     """Called while Kodi is STOPPED (else Kodi rewrites guisettings on exit and clobbers
-    it). Sets the web server on (so JSON-RPC works) + unknown sources + update-from-any-
-    repo directly in guisettings.xml. Returns True if the file was edited."""
+    it). Sets the web server on (so JSON-RPC works) + creds + unknown sources + update-
+    from-any-repo directly in guisettings.xml. Returns True if the file was edited."""
     import xml.etree.ElementTree as ET
     sftp = cli.open_sftp()
     try:
@@ -86,6 +88,8 @@ def patch_guisettings(cli):
 
     setval("services.webserver", "true")
     setval("services.webserverport", "8080")
+    setval("services.webserverusername", WEB_USER)
+    setval("services.webserverpassword", web_pass)   # Kodi 18+ needs a non-empty pass
     setval("addons.unknownsources", "true")
     setval("addons.updatemode", "1")
     f = sftp.open(GUISETTINGS, "w")
@@ -95,40 +99,45 @@ def patch_guisettings(cli):
     return True
 
 
-def configure_kodi(cli, sh):
+def configure_kodi(cli, sh, web_pass=WEB_PASS, candidates=("kodi", "123")):
     """Best-effort: ensure the web server, then enable unknown sources + update-from-any-
-    repo + the toolbox addon, all via JSON-RPC. Returns a results dict. Never raises."""
+    repo + the toolbox addon, all via JSON-RPC. Returns a results dict. Never raises.
+
+    The web server may already be on with auth set to 'kodi' or '123' -- probe both. If
+    neither answers, force known creds (web_pass) into guisettings while Kodi is stopped."""
     res = {"webserver": False, "unknownsources": False, "updatemode": False, "addon": False}
     try:
-        if not ping(sh):
-            # web server off -> enable it (+ the two add-on settings) while Kodi is stopped
+        pw = next((c for c in candidates if ping(sh, pw=c)), None)
+        if pw is None:
+            # web server off (or unknown pass) -> force web_pass + the add-on settings while stopped
             sh("systemctl stop kodi")
-            patch_guisettings(cli)
+            patch_guisettings(cli, web_pass=web_pass)
             sh("systemctl start kodi")
-            wait_ping(sh)
-        if not ping(sh):
+            if wait_ping(sh, pw=web_pass):
+                pw = web_pass
+        if pw is None:
             return res
         res["webserver"] = True
 
         # set the two add-on settings live (covers the web-server-already-on path; a no-op
         # if patch_guisettings already set them). unknownsources FIRST -- updatemode is a
         # child of it and is only writable once unknown sources is enabled.
-        rpc(sh, "Settings.SetSettingValue", {"setting": "addons.unknownsources", "value": True})
-        rpc(sh, "Settings.SetSettingValue", {"setting": "addons.updatemode", "value": 1})
+        rpc(sh, "Settings.SetSettingValue", {"setting": "addons.unknownsources", "value": True}, pw=pw)
+        rpc(sh, "Settings.SetSettingValue", {"setting": "addons.updatemode", "value": 1}, pw=pw)
         res["unknownsources"] = '"value":true' in rpc(
-            sh, "Settings.GetSettingValue", {"setting": "addons.unknownsources"}).replace(" ", "")
+            sh, "Settings.GetSettingValue", {"setting": "addons.unknownsources"}, pw=pw).replace(" ", "")
         res["updatemode"] = '"value":1' in rpc(
-            sh, "Settings.GetSettingValue", {"setting": "addons.updatemode"}).replace(" ", "")
+            sh, "Settings.GetSettingValue", {"setting": "addons.updatemode"}, pw=pw).replace(" ", "")
 
         def try_enable():
-            rpc(sh, "Addons.SetAddonEnabled", {"addonid": ADDON_ID, "enabled": True})
+            rpc(sh, "Addons.SetAddonEnabled", {"addonid": ADDON_ID, "enabled": True}, pw=pw)
             return '"enabled":true' in rpc(sh, "Addons.GetAddonDetails",
-                    {"addonid": ADDON_ID, "properties": ["enabled"]}).replace(" ", "")
+                    {"addonid": ADDON_ID, "properties": ["enabled"]}, pw=pw).replace(" ", "")
 
         ok = try_enable()
         if not ok:                          # fresh addon maybe not registered yet -> restart, retry
             sh("systemctl restart kodi")
-            wait_ping(sh)
+            wait_ping(sh, pw=pw)
             ok = try_enable()
         res["addon"] = ok
     except Exception as ex:                 # noqa: BLE001 -- configure is best-effort
@@ -145,6 +154,9 @@ def main():
                     help="restart Kodi after extract (instead of live UpdateLocalAddons)")
     ap.add_argument("--no-configure", dest="no_configure", action="store_true",
                     help="skip the JSON-RPC configure (unknown sources / update mode / enable)")
+    ap.add_argument("--webpass", default=WEB_PASS,
+                    help=f"Kodi web server password to set/expect (default {WEB_PASS!r}); "
+                         "user is always 'kodi'. 'kodi' and '123' are both probed.")
     a = ap.parse_args()
     try:
         import paramiko
@@ -188,7 +200,8 @@ def main():
 
     r = {"addon": False, "unknownsources": False, "updatemode": False, "webserver": False}
     if not a.no_configure:
-        r = configure_kodi(cli, sh)
+        cands = ("kodi", "123") if a.webpass in ("kodi", "123") else (a.webpass, "kodi", "123")
+        r = configure_kodi(cli, sh, web_pass=a.webpass, candidates=cands)
         print(f"  unknown sources: {'ON' if r['unknownsources'] else 'FAILED'}  |  "
               f"update from any repo: {'ON' if r['updatemode'] else 'FAILED'}  |  "
               f"toolbox addon: {'ENABLED' if r['addon'] else 'NOT enabled'}")
