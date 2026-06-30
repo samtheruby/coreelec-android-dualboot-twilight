@@ -109,6 +109,39 @@ partition. Build a 128-entry GPT from the backup (keep all 32 originals byte-ide
 the primary (first 34 sectors) + backup (tail) to `mmcblk0`. `build/layout.py` is the single
 source of offsets; the editor is in the build step.
 
+### 2.3b The Amlogic MPT override — why Linux must be *forced* to read the GPT
+§1.2 assumes "Linux reads the full GPT fine." That is only true when **no valid Amlogic MPT is
+present.** The Amlogic vendor kernel (which CoreELEC runs) keeps a **proprietary partition table
+("MPT")** at the start of the `reserved` partition (eMMC offset **36 MiB = 0x2400000**). When a
+valid MPT exists, the kernel **uses it and ignores the GPT** — dmesg: `mmcblk0: skip mounting disk
+with MPT partition`. The MPT is hard-capped at **`MAX_MMC_PART_NUM = 32`** entries (table size
+0x518) and lists only the stock Android partitions, so our GPT-added **`CE_FLASH` is invisible to
+the kernel** → no `mmcblk0p33` node → `boot=LABEL=CE_FLASH` can't mount → **CoreELEC hangs on the
+MI boot logo** (no framebuffer hand-off). u-boot can still `imgread` the CE kernel from `boot_<slot>`
+(the gate fires), so the symptom is a logo hang *after* the gate, not a fall-through to Android.
+
+Format: `"MPT\0"` + version `01.00.00` + `part_num`(u32@0x10) + `checksum`(u32@0x14) + `part_num`×40 B
+entries (`char name[16]; u64 size; u64 offset; u32 mask_flags; pad`). The checksum is an Amlogic **bug**
+— `part_num × wordsum(entry[0])` only (the calc loop never advances past entry 0), so it validates the
+count and partition #0 but nothing else.
+
+**Why some units boot internally and others don't (identical install):** a unit with a **blank** MPT
+region falls back to the GPT scan (all 34 partitions) and boots; a unit with a **populated** MPT does
+not. An applied **A/B OTA re-populates the MPT** to factory-stock-32 (the same OTA also clobbers the
+inactive `boot_<slot>`/`dtbo_<slot>` — see §2.11), which is exactly how a previously-working stick
+regressed to a logo hang. Confirmed by comparing a working twin (byte-identical GPT, same gate):
+its `reserved[0:0x4000]` was **all zeros (no MPT)**, `AMLNORMAL` at 0x4000; the broken unit had a
+valid 32-entry MPT there.
+
+**Fix (`flash_to_coreelec.py::wipe_mpt`, runs in the flash step):** zero `reserved[0:0x1000]` (the MPT
+struct is 0x518; `AMLNORMAL`@0x4000 and all identity further in `reserved` are untouched) so the kernel
+falls back to the GPT and sees `CE_FLASH`. Idempotent (no-op if no MPT magic); `reserved_pre.bin` backs
+up the original. *Not* a kernel patch: the override is correct-by-design Amlogic behavior (the BootROM
+loads from 0x200 where a GPT header would sit, so Amlogic uses its own table), and blanking the MPT is
+the platform-correct way to make Linux use the GPT. Recurrence is prevented at the source by `blockgms`/
+`blockota` (§2.11); the installer wipe + the pre-write `reserved` backup make a fresh install correct
+and reversible.
+
 ### 2.4 Partition carve + size rationale
 Final layout (sums to 4176): **userdata 2376 / CE_FLASH 600 / CE_STORAGE 1200 MiB**.
 - `CE_FLASH` (FAT32) holds SYSTEM (~347 M) + kernel + recovery + dtb + dovi (~381 M used).

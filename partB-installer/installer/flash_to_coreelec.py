@@ -334,6 +334,7 @@ class Ctx:
             ("dtb", "dtboa.img", f"by-name/dtbo{ce_slot}"),
             ("A/B misc", "misc_target.bin", "by-name/misc seek=2048"),
             ("env (LAST)", "env_target.bin", "by-name/env"),
+            ("MPT wipe", "/dev/zero x8", "by-name/reserved seek=0 (blank Amlogic MPT)"),
         ]:
             print(f"   {lbl:<16} {src:<22} -> {dst}")
         print("   then: BCB <- boot-recovery + --wipe_data (next reboot reformats userdata)")
@@ -396,6 +397,10 @@ class Ctx:
         # env (push+dd; a bad env just falls back to default -> Android still boots)
         self.push_dd("env_target.bin", "/dev/block/by-name/env", 0, "env")
         self._verify_env(ce_slot)
+        # Blank the Amlogic proprietary partition table (MPT) so the CoreELEC kernel
+        # falls back to the GPT and can see CE_FLASH/CE_STORAGE. Non-carve, idempotent.
+        self.wipe_mpt()
+        self._verify_mpt()
         # CoreELEC filesystems LAST: MUST nc-stream -- they land in the carve by raw
         # offset, so staging them on userdata would be the read-during-overwrite
         # brick race; too big to push anyway. After this, only the SB wipe + sync.
@@ -447,6 +452,43 @@ class Ctx:
         if d.get("boot_ce") != "0" or f"imgread kernel boot{ce_slot}" not in d.get("bootcefromemmc", ""):
             sys.exit("env verify failed: gate/boot_ce wrong")
         print(f"  verify env: CRC OK, boot_ce=0, gate->boot{ce_slot}")
+
+    # ---- Amlogic MPT (kernel-visible partition table) ----------------------
+    def wipe_mpt(self):
+        r"""Blank the Amlogic proprietary partition table ("MPT") at the start of the
+        `reserved` partition so the CoreELEC (Amlogic vendor) kernel falls back to the
+        full GPT and can see CE_FLASH/CE_STORAGE (mmcblk0p33/p34).
+
+        Why this is needed: the Amlogic kernel, when a VALID MPT exists at 36 MiB
+        (reserved offset 0), uses it and IGNORES the GPT ("skip mounting disk with MPT
+        partition"). The stock MPT is capped at MAX_MMC_PART_NUM=32 entries listing only
+        the Android partitions, so our GPT-added CE_FLASH is invisible -> CoreELEC hangs
+        on the boot logo (can't mount boot=LABEL=CE_FLASH). A unit with NO MPT falls back
+        to the GPT scan and boots fine. An applied A/B OTA re-populates the MPT (factory
+        stock) -- exactly how a previously-working unit regressed -- so we blank it here.
+        `reserved_pre.bin` (pulled before any write) backs up the original.
+
+        Only the MPT struct (magic "MPT\0" + up to 32x40 B entries = 0x518 B) is touched:
+        we zero the first 8 sectors (4 KiB). The `AMLNORMAL` block at reserved+0x4000 and
+        all device identity further in `reserved` are untouched (verified on hardware).
+        Idempotent: a no-op if no MPT magic is present.
+        """
+        magic = self.su_bytes("dd if=/dev/block/by-name/reserved bs=4 count=1 2>/dev/null")[:4]
+        if magic != b"MPT\x00":
+            print(f"  MPT: none present (magic={magic!r}) -- kernel already GPT-visible, skip")
+            return
+        out, rc = self.su("dd if=/dev/zero of=/dev/block/by-name/reserved bs=512 count=8 conv=fsync 2>&1")
+        if rc != 0:
+            sys.exit(f"MPT wipe failed: {out.strip()}")
+        print("  WIPE Amlogic MPT (reserved[0:0x1000]) -> kernel falls back to GPT (CE_FLASH visible)")
+
+    def _verify_mpt(self):
+        self._drop_caches()
+        magic = self.su_bytes("dd if=/dev/block/by-name/reserved bs=4 count=1 2>/dev/null")[:4]
+        if magic == b"MPT\x00":
+            sys.exit("MPT verify failed: 'MPT' magic still present in reserved -- "
+                     "CoreELEC kernel would not see CE_FLASH")
+        print("  verify MPT: blanked (kernel uses GPT)")
 
     # ---- end-to-end SHA-256 read-back verification -------------------------
     def _sha_file(self, path):
