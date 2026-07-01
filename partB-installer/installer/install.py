@@ -220,6 +220,15 @@ def stage_magisk(a):
         sys.exit(f"Patched init_boot image not found at: {img}\nPass --magisk-img <path>")
     print(f"  image: {img}  ({os.path.getsize(img):,} B)")
 
+    # Patch the ACTIVE slot's init_boot so the *running* system uses the rooted
+    # ramdisk. Do NOT hardcode _a: on a unit whose active slot is _b, flashing
+    # init_boot_a roots the inactive slot and leaves the running system unrooted.
+    r = subprocess.run(["adb", "-s", a.serial, "shell", "getprop", "ro.boot.slot_suffix"],
+                       capture_output=True, text=True)
+    slot = (r.stdout or "").strip() or "_a"
+    ib_part = f"init_boot{slot}"
+    print(f"  active slot={slot} -> will flash {ib_part}")
+
     # ---- C. Reboot to fastboot and flash ----------------------------------------
     fs = getattr(a, "fastboot_serial", None) or ""
     fb = ["fastboot"] + (["-s", fs] if fs else [])
@@ -245,11 +254,11 @@ def stage_magisk(a):
         sys.exit("fastboot device did not appear within 60 s -- "
                  "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
 
-    print("  fastboot flash init_boot_a ...")
-    r = subprocess.run(fb + ["flash", "init_boot_a", img])
+    print(f"  fastboot flash {ib_part} ...")
+    r = subprocess.run(fb + ["flash", ib_part, img])
     if r.returncode != 0:
-        sys.exit("fastboot flash init_boot_a FAILED")
-    print("  init_boot_a flashed OK")
+        sys.exit(f"fastboot flash {ib_part} FAILED")
+    print(f"  {ib_part} flashed OK")
 
     # ---- D. Reboot to Android and verify root -----------------------------------
     print("  rebooting to Android ...")
