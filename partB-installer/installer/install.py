@@ -7,6 +7,10 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
 [generic]=any Google TV / CoreELEC box.
 
   ANDROID phase (--serial):
+    stage_unlock  unlock the bootloader via fastboot            [Xiaomi]  DESTRUCTIVE
+                   run BEFORE stage_magisk on a locked unit (most are).
+                   fastboot flashing unlock + unlock_critical -> factory reset;
+                   device must be RE-SETUP from scratch afterwards.
     stage_magisk  flash Magisk-patched init_boot_a via fastboot  [Xiaomi]
                    run BEFORE stage0 -- gives root that stage0 requires.
                    Reboots to bootloader, flashes, reboots back to Android.
@@ -29,6 +33,7 @@ The [generic] stage3 pieces (Toolbox addon, Kodi sources) also run standalone on
 any CoreELEC box -- see deploy_toolbox_addon.py / deploy_kodi_sources.py.
 
 Usage:
+  python install.py stage_unlock --serial <ip:port> --yes        # unlock bootloader (wipes device)
   python install.py stage_magisk --serial <ip:port>              # auto-find init_boot_patched.img
   python install.py stage_magisk --serial <ip:port> --magisk-img <path>
   python install.py stage1  --serial <ip:port> --yes
@@ -57,6 +62,117 @@ def su(serial, cmd):
     r = subprocess.run(["adb", "-s", serial, "exec-out", "su -c '" + cmd.replace("'", "'\\''") + "'"],
                        capture_output=True)
     return r.stdout.decode("utf-8", "replace"), r.returncode
+
+
+# ---- stage_unlock: unlock the bootloader (fastboot flashing unlock) ----------
+def stage_unlock(a):
+    """Unlock the bootloader so stage_magisk can flash a patched init_boot.
+
+    Most units ship with a LOCKED bootloader that was never unlocked. fastboot
+    refuses to flash on a locked bootloader, so stage_magisk fails. This stage
+    reboots to fastboot, checks the lock state via `getvar unlocked`, and (if
+    locked) runs `flashing unlock` + `flashing unlock_critical`.
+
+    DESTRUCTIVE: unlocking triggers a factory reset. After this stage the device
+    reboots and must be re-setup from scratch (skip Google sign-in / re-enable
+    ADB) BEFORE running stage_magisk.
+    """
+    import time
+    print("== stage_unlock: unlock the bootloader (fastboot flashing unlock) ==")
+    print("  A Mi-logo splash appears on the set-top box during fastboot.")
+
+    fs = getattr(a, "fastboot_serial", None) or ""
+    fb = ["fastboot"] + (["-s", fs] if fs else [])
+
+    def fb_run(*args, **kw):
+        try:
+            return subprocess.run(fb + list(args), **kw)
+        except FileNotFoundError:
+            sys.exit("fastboot not found on PATH -- install Android platform-tools")
+
+    # ---- A. Reboot to fastboot (unless already there) ---------------------------
+    r = fb_run("devices", capture_output=True, text=True)
+    already_fastboot = any(l.strip() and not l.startswith("List")
+                           for l in r.stdout.splitlines())
+    if not already_fastboot:
+        print(f"  rebooting {a.serial!r} into bootloader ...")
+        adb(a.serial, "reboot", "bootloader")
+        print("  waiting for fastboot device (up to 60 s) ...")
+        found = False
+        for _ in range(60):
+            r = fb_run("devices", capture_output=True, text=True)
+            devlines = [l for l in r.stdout.splitlines()
+                        if l.strip() and not l.startswith("List")]
+            if devlines:
+                print(f"  fastboot: {devlines[0].strip()}")
+                found = True
+                break
+            time.sleep(1)
+        if not found:
+            sys.exit("fastboot device did not appear within 60 s -- "
+                     "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
+
+    # ---- B. Check current lock state -------------------------------------------
+    # `getvar unlocked` prints to stderr as `unlocked: yes|no`.
+    r = fb_run("getvar", "unlocked", capture_output=True, text=True)
+    var_out = (r.stdout or "") + (r.stderr or "")
+    unlocked = None
+    for line in var_out.splitlines():
+        if "unlocked:" in line:
+            val = line.split("unlocked:", 1)[1].strip().lower()
+            unlocked = val.startswith("yes")
+            break
+    if unlocked is True:
+        print("  Bootloader already unlocked. Nothing to do.")
+        print("  Rebooting to Android; continue with stage_magisk.")
+        fb_run("reboot")
+        return 0
+    if unlocked is None:
+        print("  WARNING: could not read the lock state from `getvar unlocked`.")
+        print(f"  raw output: {var_out.strip() or '(empty)'}")
+        print("  Proceeding on the assumption the bootloader is LOCKED.")
+    else:
+        print("  Bootloader is LOCKED (unlocked: no).")
+
+    # ---- C. Confirm the destructive unlock -------------------------------------
+    if not a.yes:
+        print()
+        print("  ATTENTION: unlocking the bootloader ERASES ALL DATA (factory reset).")
+        print("  Re-run with --yes to proceed:")
+        print(f"    python install.py stage_unlock --serial {a.serial} --yes")
+        print("  Leaving the device in fastboot. Reboot manually with: fastboot reboot")
+        return 1
+
+    # ---- D. Unlock --------------------------------------------------------------
+    for cmd in (["flashing", "unlock"], ["flashing", "unlock_critical"]):
+        print(f"  fastboot {' '.join(cmd)} ...")
+        r = fb_run(*cmd)
+        if r.returncode != 0:
+            print(f"  WARNING: `fastboot {' '.join(cmd)}` returned {r.returncode}.")
+            print("  If the device screen is asking to confirm, use the remote/volume+power")
+            print("  keys on the set-top box to CONFIRM the unlock, then re-run this stage.")
+            sys.exit(f"fastboot {' '.join(cmd)} FAILED")
+
+    # ---- E. Verify + reboot -----------------------------------------------------
+    r = fb_run("getvar", "unlocked", capture_output=True, text=True)
+    var_out = (r.stdout or "") + (r.stderr or "")
+    if "unlocked: yes" in var_out:
+        print("  Bootloader unlocked (unlocked: yes).")
+    else:
+        print("  Unlock commands sent; could not re-confirm `unlocked: yes`.")
+        print(f"  raw output: {var_out.strip() or '(empty)'}")
+
+    print("  rebooting the device ...")
+    fb_run("reboot")
+    print()
+    print("  Bootloader unlocked. The device factory-reset itself and will boot to")
+    print("  Android first-time setup. RE-SETUP FROM SCRATCH:")
+    print("    1. Complete Android setup (you can skip Google sign-in)")
+    print("    2. Re-enable Developer options + USB/wireless debugging")
+    print("    3. Re-authorize ADB, reconnect (adb connect <ip:port> if wireless)")
+    print("  Then run stage_magisk:")
+    print("    python install.py stage_magisk --serial <ip:port>")
+    return 0
 
 
 # ---- stage_magisk: install Magisk APK + flash patched init_boot_a via fastboot -
@@ -311,8 +427,8 @@ def verify(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a",
-                                      "stage3", "verify", "all"])
+    ap.add_argument("stage", choices=["stage_unlock", "stage_magisk", "stage0", "stage1", "stage1b",
+                                      "stage2", "stage2a", "stage3", "verify", "all"])
     ap.add_argument("--serial", help="adb serial for the Android stages (ip:port or USB id); "
                     "omit to auto-pick the only attached device")
     ap.add_argument("--host", help="CoreELEC IP (stage3; device booted into CoreELEC)")
@@ -331,7 +447,7 @@ def main():
                     help="stage_magisk: fastboot device serial (auto-detected if omitted)")
     a = ap.parse_args()
 
-    if a.stage in {"stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
+    if a.stage in {"stage_unlock", "stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
         import adb_serial
         a.serial = adb_serial.resolve(a.serial)
 
@@ -344,7 +460,7 @@ def main():
             print("  (stage_magisk skipped: no init_boot_patched.img found in artifacts/ or bundle root)")
         stage0(a)
         sys.exit(stage1(a))
-    sys.exit({"stage_magisk": stage_magisk, "stage0": stage0, "stage1": stage1,
+    sys.exit({"stage_unlock": stage_unlock, "stage_magisk": stage_magisk, "stage0": stage0, "stage1": stage1,
               "stage1b": stage1b, "stage2": stage2, "stage2a": stage2a,
               "stage3": stage3, "verify": verify}[a.stage](a))
 

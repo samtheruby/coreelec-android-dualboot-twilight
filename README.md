@@ -48,9 +48,10 @@ Android stays the default; CoreELEC is one tap away (or make CoreELEC the defaul
 
 **The stick:**
 - Developer options on → **USB debugging** + **Network debugging** (ADB)
-- Bootloader unlocked (ships unlockable; required for Magisk)
+- Bootloader unlocked (ships unlockable; required for Magisk). Most sticks were
+  never unlocked — the `stage_unlock` step (step 3 below) does it via fastboot.
 - **Root** (Magisk) — `su` must work before stage 0. If not yet rooted, the
-  `stage_magisk` step (step 3 below) handles it via fastboot.
+  `stage_magisk` step (step 4 below) handles it via fastboot.
 
 Connect by **USB** (plug in, authorize the prompt) or **wireless** (`adb connect <stick-ip>:<port>`),
 then confirm `adb devices` shows it. Every `--serial` below accepts a **USB id or `ip:port`** — or
@@ -77,7 +78,23 @@ adb devices            # confirm your stick is listed (USB id or ip:port)
 > In every command below you can drop `--serial <…>` when only one device is attached (it
 > auto-detects), or pass the **USB id** instead of `ip:port`. USB is faster/steadier for stage 1.
 
-**3. Root the stick with Magisk (skip if already rooted)**
+**3. Unlock the bootloader — ⚠️ THIS WIPES THE STICK (skip if already unlocked)**
+Skip if `fastboot getvar unlocked` already shows `unlocked: yes`. Most sticks were never
+unlocked, and a locked bootloader makes the next step (fastboot flash) fail.
+
+With **USB connected**, run:
+```
+python installer/install.py stage_unlock --serial <ip:port> --yes
+```
+Reboots into the bootloader (a **Mi logo** splash appears on the stick), checks the lock
+state with `fastboot getvar unlocked`, and — if locked — runs `fastboot flashing unlock`
++ `fastboot flashing unlock_critical`. If the stick's screen asks you to confirm, use the
+remote/volume+power keys to approve. `getvar unlocked` then returns `yes` and it reboots.
+> Unlocking **factory-resets the stick**. Afterwards walk through Android first-time setup
+> from scratch (you can skip Google sign-in), re-enable **USB + Network debugging**, and
+> `adb connect <ip:port>` again before continuing.
+
+**4. Root the stick with Magisk (skip if already rooted)**
 Skip if `adb shell su -c id` already returns `uid=0`.
 
 With **USB connected** (required for the fastboot flash step), run:
@@ -88,13 +105,13 @@ The script installs the bundled Magisk APK, reboots into the bootloader, flashes
 pre-patched `init_boot_a`, and reboots back to Android. If root is not immediately confirmed,
 open the Magisk app to complete first-time setup, then verify: `adb shell su -c id` → `uid=0`.
 
-**4. Back up + preflight (safe, no changes)**
+**5. Back up + preflight (safe, no changes)**
 ```
 python installer/install.py stage0 --serial <ip:port>
 ```
 Saves a full backup of every region to `pulled_backups/` and refuses to go on unless the stick is a clean, stock, rooted `twilight`. **Don't skip this** — it's what `restore` uses later.
 
-**5. Install — ⚠️ THIS WIPES ANDROID USER DATA**
+**6. Install — ⚠️ THIS WIPES ANDROID USER DATA**
 Start with a dry run -
 ```
 python installer/install.py stage1 --serial <ip:port>
@@ -106,32 +123,32 @@ adb -s <ip:port> reboot
 ```
 > This step writes the new partition layout + CoreELEC. Every region is SHA-256 verified, then a recovery wipe is armed. On `reboot` the stick enters **recovery**, reformats its (now smaller) storage one time, and boots Android. (Leave off `--yes` to do a dry run that only prints the plan.)
 
-**6. Re-setup Android, then reconnect**
+**7. Re-setup Android, then reconnect**
 - Let the recovery wipe + Android first-time setup finish (it reboots itself once). Walk through setup, re-enable USB/Network debugging.
 - `adb connect <ip:port>` again (the address may change).
 
-**7. Re-install Magisk APK (stage 1's factory reset wiped it)**
+**8. Re-install Magisk APK (stage 1's factory reset wiped it)**
 ```
 python installer/install.py stage1b --serial <ip:port>
 ```
 The factory reset wipes `/data` including the Magisk APK and its root-grant database. `init_boot_a` is still patched so no fastboot is needed — this just re-installs the APK. When prompted, open the **Magisk app** on the stick, complete first-time setup, and **approve the root-access dialog** for ADB shell. The script waits up to 120 s for `uid=0` confirmation, then prints the stage 2 command.
 
-**8. Apps + modules**
+**9. Apps + modules**
 ```
 python installer/install.py stage2 --serial <ip:port>
 ```
 Re-applies the u-boot boot gate (stage 1's factory reset clears it), then installs the **Reboot to CoreELEC** app, the OS-update self-heal files, and the modules that keep updates from clobbering CoreELEC. **Don't try CoreELEC before stage 2** — without this step the switcher can't enter it. Reboot after this stage with `adb -s <ip:port> reboot` only if you are not running stage2a.
 
-**9. (Optional) Block the Xiaomi updater too**
+**10. (Optional) Block the Xiaomi updater too**
 ```
 python installer/install.py stage2a --serial <ip:port>
 adb -s <ip:port> reboot
 ```
 
-**10. Boot into CoreELEC**
+**11. Boot into CoreELEC**
 - After the reboot, open the **Reboot to CoreELEC** app on the stick and reboot into CoreELEC.
 
-**11. Finish CoreELEC setup**
+**12. Finish CoreELEC setup**
 ```
 python installer/install.py stage3 --host <coreelec-ip>
 ```
@@ -149,7 +166,7 @@ The install has **two phases**, distinguished by how the PC talks to the stick:
 
 | phase | device booted in | transport | stages |
 |---|---|---|---|
-| **Pre-install** | Android (Google TV) | `adb` + USB fastboot | stage_magisk |
+| **Pre-install** | Android (Google TV) | `adb` + USB fastboot | stage_unlock, stage_magisk |
 | **Android** | Android (Google TV) | `adb` / `--serial <ip:port>` | stage0, stage1, stage1b, stage2, stage2a, verify |
 | **CoreELEC** | CoreELEC (after first CE boot) | `ssh` / `--host <ip>` | stage3 |
 
@@ -157,6 +174,18 @@ Run everything through `partB-installer/installer/install.py`. Each stage is als
 standalone.
 
 ---
+
+### Stage_unlock — unlock the bootloader via fastboot (pre-stage_magisk, ⚠️ destructive)
+```
+python installer/install.py stage_unlock --serial <ip:port> --yes
+```
+Reboots the stick into fastboot (a **Mi logo** splash appears), reads the lock state with
+`fastboot getvar unlocked`, and — if locked — runs `fastboot flashing unlock` +
+`fastboot flashing unlock_critical`, then reboots. A locked bootloader rejects the
+`stage_magisk` flash, so run this first on any stick that was never unlocked. Without `--yes`
+it stops after reporting the lock state (no changes). Confirm the on-screen unlock prompt with
+the remote/volume+power keys if the stick asks. **Unlocking factory-resets the stick** — re-do
+Android setup and re-enable ADB before `stage_magisk`. **Requires USB for fastboot.**
 
 ### Stage_magisk — flash Magisk-patched init_boot via fastboot (pre-stage 0)
 ```
