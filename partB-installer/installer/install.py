@@ -11,7 +11,7 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
                    run BEFORE stage_magisk on a locked unit (most are).
                    fastboot flashing unlock + unlock_critical -> factory reset;
                    device must be RE-SETUP from scratch afterwards.
-    stage_magisk  flash Magisk-patched init_boot_a via fastboot  [Xiaomi]
+    stage_magisk  flash Magisk-patched init_boot (active slot) fastboot [Xiaomi]
                    run BEFORE stage0 -- gives root that stage0 requires.
                    Reboots to bootloader, flashes, reboots back to Android.
     stage0  preflight + PC-side backups      [Xiaomi]   read-only + pull
@@ -175,10 +175,10 @@ def stage_unlock(a):
     return 0
 
 
-# ---- stage_magisk: install Magisk APK + flash patched init_boot_a via fastboot -
+# ---- stage_magisk: install Magisk APK + flash patched init_boot via fastboot --
 def stage_magisk(a):
     import time, glob as _glob
-    print("== stage_magisk: install Magisk + flash patched init_boot_a ==")
+    print("== stage_magisk: install Magisk + flash patched init_boot ==")
 
     magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
 

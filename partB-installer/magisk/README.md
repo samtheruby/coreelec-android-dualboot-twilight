@@ -20,8 +20,8 @@ Just run (USB must be connected for the fastboot flash step):
 ```
 python installer/install.py stage_magisk --serial <ip:port>
 ```
-The script installs the Magisk APK, flashes the pre-patched `init_boot_a` via fastboot,
-and reboots back to Android.
+The script installs the Magisk APK, flashes the pre-patched `init_boot` of the active slot
+via fastboot, and reboots back to Android.
 
 ## Creating a patched image for a new device
 

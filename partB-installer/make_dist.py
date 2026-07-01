@@ -133,14 +133,32 @@ Self-contained. Needs only **Python 3** + **adb** and a **stock, rooted, unlocke
 > pre-flight refuses non-stock / already-modified units. Stage 2's app + GMS block
 > are generic to Google/Android TV; stage 2a is Xiaomi-only.
 
-Prep on the stick: Developer options + ADB on, bootloader unlocked. Connect by **USB**
-(plug in, authorize the prompt) **or wireless** (`adb connect <ip>:<port>`); confirm
-`adb devices`. Every `--serial` below takes either a **USB id or `ip:port`** -- or omit
-`--serial` entirely to auto-pick when just one device is attached. (USB is typically
-faster + more stable for the big stage-1 image streams.)
+Prep on the stick: Developer options + ADB on, bootloader unlocked (most sticks were
+never unlocked -- see stage_unlock below). Connect by **USB** (plug in, authorize the
+prompt) **or wireless** (`adb connect <ip>:<port>`); confirm `adb devices`. Every
+`--serial` below takes either a **USB id or `ip:port`** -- or omit `--serial` entirely to
+auto-pick when just one device is attached. (USB is typically faster + more stable for the
+big stage-1 image streams.)
+
+## Stage_unlock -- unlock the bootloader (run before stage_magisk, DESTRUCTIVE)
+`stage_magisk` flashes via fastboot, which a **locked** bootloader refuses. Most sticks
+were never unlocked, so run this first. **Unlocking factory-resets the stick.** Skip if
+`fastboot getvar unlocked` already shows `unlocked: yes`.
+
+With **USB connected**, run:
+```
+python installer/install.py stage_unlock --serial <ip:port> --yes
+```
+Reboots into the bootloader (a Mi-logo splash appears on the stick), checks the lock state
+with `fastboot getvar unlocked`, and -- if locked -- runs `fastboot flashing unlock` +
+`fastboot flashing unlock_critical` (confirm on the device with the remote/volume+power keys
+if prompted), then reboots. Because unlocking wipes the stick, **re-setup Android from
+scratch** (skip Google sign-in if you like), re-enable Developer options + ADB, reconnect,
+then run stage_magisk.
 
 ## Stage_magisk -- install Magisk and flash patched init_boot (run before stage 0)
-If the stick is not yet rooted, use this step to get root before stage 0 requires it.
+If the stick is not yet rooted, use this step to get root before stage 0 requires it. The
+bootloader must be **unlocked** first (see stage_unlock).
 
 With **USB connected** (required for the fastboot flash), run:
 ```
@@ -148,7 +166,7 @@ python installer/install.py stage_magisk --serial <ip:port>
 ```
 The script automatically:
 1. Installs the bundled Magisk APK via adb
-2. Reboots into the bootloader and flashes the pre-patched `init_boot_a`
+2. Reboots into the bootloader and flashes the pre-patched `init_boot` of the active slot
 3. Reboots back to Android and verifies root
 
 If root is not immediately confirmed, open the Magisk app to complete any first-time setup,
@@ -183,7 +201,7 @@ run **stage 1b** before stage 2. (The reset also clears the u-boot env gate --
 python installer/install.py stage1b --serial <ip:port>
 ```
 The stage 1 factory reset wipes `/data`, which removes the Magisk APK and its
-root-grant database. `init_boot_a` is **still patched** (that partition is untouched),
+root-grant database. The active slot's `init_boot` is **still patched** (that partition is untouched),
 so no fastboot is needed -- only the APK needs to be re-installed.
 
 The script installs the APK, then waits up to 120 s for root confirmation. During that
