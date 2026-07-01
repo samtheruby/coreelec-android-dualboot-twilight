@@ -279,7 +279,7 @@ def stage_magisk(a):
                 print("  any first-time setup, then verify: adb shell su -c id")
             return 0
         time.sleep(1)
-    print("  init_boot_a flashed successfully.")
+    print(f"  {ib_part} flashed successfully.")
     print("  ADB did not reconnect on the same serial within 90 s.")
     if ":" in a.serial:
         print("  Device rebooted -- reconnect with: adb connect <ip:port>")
@@ -297,7 +297,7 @@ def stage0(a):
 def stage1b(a):
     import glob as _glob
     print("== stage1b: re-install Magisk APK (factory reset wiped userdata) ==")
-    print("  (init_boot_a is still patched -- no fastboot needed)")
+    print("  (the active slot's init_boot is still patched -- no fastboot needed)")
 
     magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
     apks = sorted(_glob.glob(os.path.join(magisk_dir, "Magisk*.apk")) +

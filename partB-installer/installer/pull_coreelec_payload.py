@@ -12,8 +12,10 @@ Gathers, in one shot, everything Part B needs from the known-good unit:
   4. /flash payload            -> kernel.img, SYSTEM(+md5), dtb.img, cfgload,
                                   config.ini, recovery.img, device_trees/, dovi.ko,
                                   user-update.sh  (baked into ce_flash.img later).
-  5. raw boot_a(p21)+dtbo_a(p12) -> what u-boot actually loads (authoritative
+  5. raw boot+dtbo of the CE slot -> what u-boot actually loads (authoritative
                                   boota/dtboa sources; compared against /flash).
+                                  Slot read from the live env gate; by-name paths
+                                  with an _a p21/p12 fallback.
   6. sha256 of everything.
 
 Usage:  python pull_coreelec_payload.py [HOST]   (default 192.168.1.196)
@@ -103,12 +105,29 @@ def pull_tree(remote, local):
 
 pull_tree("/flash", flashdir)
 
-# ---- 5. raw boot_a + dtbo_a -------------------------------------------------
-print("== 5. boot_a(p21) + dtbo_a(p12) raw ==")
-for name, devpath in (("boot_a_live.bin", "/dev/mmcblk0p21"),
-                      ("dtbo_a_live.bin", "/dev/mmcblk0p12")):
-    out, err, rc = run(f"dd if={devpath} bs=1M 2>/dev/null | base64", timeout=240)
-    raw = __import__("base64").b64decode(out)
+# ---- 5. raw boot + dtbo of the slot u-boot actually loads -------------------
+# The authoritative kernel/dtb source is the CE slot the gate boots -- read it
+# from the live env's gate (bootcefromemmc: "imgread kernel boot_a|boot_b").
+# Fall back to _a (p21/p12) if the gate can't be parsed.
+gate = ""
+for line in out.splitlines():
+    if line.startswith("bootcefromemmc="):
+        gate = line
+        break
+ce_slot = "_b" if "imgread kernel boot_b" in gate else "_a"
+print(f"== 5. boot{ce_slot} + dtbo{ce_slot} raw (CE slot from gate) ==")
+# Prefer by-name symlinks (slot-correct); fall back to fixed partitions for _a.
+fallback = {"_a": {"boot": "/dev/mmcblk0p21", "dtbo": "/dev/mmcblk0p12"}}.get(ce_slot, {})
+for part in ("boot", "dtbo"):
+    name = f"{part}{ce_slot}_live.bin"
+    byname = f"/dev/block/by-name/{part}{ce_slot}"
+    fb = fallback.get(part, "")
+    devpath = f"$(readlink -f {byname} 2>/dev/null || echo {fb})"
+    out5, err, rc = run(f"src={devpath}; dd if=\"$src\" bs=1M 2>/dev/null | base64", timeout=240)
+    raw = __import__("base64").b64decode(out5)
+    if not raw:
+        print(f"   !! {name}: empty dump (by-name {byname} missing and no fallback) -- skipped")
+        continue
     open(os.path.join(DEST, name), "wb").write(raw)
     print(f"   {name} ({len(raw)} B) sha256={hashlib.sha256(raw).hexdigest()[:16]}")
 
