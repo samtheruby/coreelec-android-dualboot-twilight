@@ -11,10 +11,15 @@ Android stays the default; CoreELEC is one tap away (or make CoreELEC the defaul
 
 > **Hardware scope:** Xiaomi TV Stick 4K 2nd Gen — codename `twilight` / `adastra`,
 > model `MiTV-AFMU1`, SoC **Amlogic s7d (S905X5M)**, 2 GB RAM, ~7.28 GiB eMMC, Android 14.
-> **Stage 1 is model-locked to `twilight`** (GPT offsets, dtb, partition sizes are specific to
-> it). Pre-flight refuses anything else. The CoreELEC-side extras (Toolbox addon, Kodi sources)
-> are generic and run on any CoreELEC box. For porting to other devices see
-> [`research.md`](research.md).
+> **Stage 1 is geometry-locked to a specific unit** (GPT offsets, dtb, partition sizes are
+> device-specific). The installer identifies the unit through the device registry
+> (`build/devices.py`) by **model + eMMC sector count**, not by codename — the Xiaomi TV Box S
+> 3rd Gen (`MiTV-AFMU0`) is the *same* `twilight` codename, so codename alone can't tell them
+> apart. Pre-flight refuses any unrecognised unit, and refuses a recognised unit whose carve
+> layout isn't implemented yet. The TV Box S 3rd Gen is currently recognised (rooting / env
+> steps work) but its carve geometry is still being ported, so geometry-dependent steps refuse
+> it for now. The CoreELEC-side extras (Toolbox addon, Kodi sources) are generic and run on any
+> CoreELEC box. For porting to other devices see [`research.md`](research.md).
 
 ---
 
@@ -194,10 +199,13 @@ python installer/install.py stage_magisk --serial <ip:port>
 Reboots the stick into the fastboot bootloader, flashes `init_boot_a` with the Magisk-patched image,
 then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone isn't enough).
 
-The image is auto-located by device name: `magisk/{device}-init_boot-patched.img` (e.g.
-`magisk/twilight-init_boot-patched.img`). Falls back to `artifacts/` and the bundle root for
-compatibility. Override with `--magisk-img <path>`. Use `--fastboot-serial <serial>` if multiple
-fastboot devices are connected.
+The image is chosen from the **device registry** (`build/devices.py`): the installer
+identifies the unit by `ro.product.model` (cross-checked against the eMMC sector count) and
+picks that device's patched `init_boot` — e.g. `magisk/twilight-init_boot-patched.img` for the
+stick. It does **not** key off the codename, because the stick and the TV Box S 3rd Gen both
+report `device=twilight`. Falls back to `artifacts/` and the bundle root for compatibility.
+Override with `--magisk-img <path>`. Use `--fastboot-serial <serial>` if multiple fastboot
+devices are connected.
 
 Only needed once per unit. If root is already active, skip it.
 

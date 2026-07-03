@@ -12,7 +12,7 @@ import argparse, base64, os, subprocess, sys, struct, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc, layout as L  # noqa
+import envtool, build_env, ab_misc, layout as L, devices  # noqa
 
 PASS, FAIL = 0, 0
 
@@ -54,10 +54,15 @@ def main():
     s = args.serial
 
     print("== device identity (read-only) ==")
-    dev = su_bytes(s, "getprop ro.product.device").decode().strip()
+    # Identify by model + eMMC size (aborts on unknown/mismatch). This validates the
+    # stick's GPT/layout artifacts, so a not-yet-implemented layout is refused.
+    dev = devices.identify(
+        lambda p: su_bytes(s, f"getprop {p}").decode().strip(),
+        devices.sectors_reader(lambda cmd: su_bytes(s, cmd).decode("utf-8", "replace")),
+        require_layout=True)
     active = su_bytes(s, "getprop ro.boot.slot_suffix").decode().strip()
     ce_slot = {"_a": "_b", "_b": "_a"}.get(active)
-    chk(dev == "twilight", f"device == twilight (got '{dev}')")
+    chk(True, f"device identified: {dev.name} [{dev.slug}] model={dev.model}")
     chk(ce_slot in ("_a", "_b"), f"slot detect: active={active} -> CE={ce_slot}")
 
     print("\n== env: build_target_env on the unit's OWN env ==")

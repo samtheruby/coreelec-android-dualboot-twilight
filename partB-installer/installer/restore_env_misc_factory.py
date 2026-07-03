@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage0 dumps
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc  # noqa: E402
+import envtool, build_env, ab_misc, devices  # noqa: E402
 
 # Prefer THIS unit's pre-install env+misc (stage0) over the dev reference dumps.
 if os.path.exists(os.path.join(PB, "env_pre.bin")) and os.path.exists(os.path.join(PB, "misc_pre.bin")):
@@ -105,9 +105,12 @@ def main():
     print(f"  env source: crc OK, {len(ed)} keys, no gate (factory)")
 
     # ---- device ----
+    # env+misc restore is geometry-independent (this unit's own factory dumps),
+    # so the box is allowed: require_layout=False.
     print(f"\n-- device --")
-    if d.getprop("ro.product.device") != "twilight":
-        sys.exit("device != twilight -- abort")
+    devices.identify(d.getprop,
+                     devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
+                     require_layout=False, log=print)
     if "uid=0" not in d.su("id")[0]:
         sys.exit("su root not available")
     env_psz = d.part_size("env")

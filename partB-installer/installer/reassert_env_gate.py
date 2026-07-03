@@ -24,6 +24,7 @@ import argparse, os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import envtool  # noqa: E402
+import devices  # noqa: E402  -- stick/box discrimination registry
 
 
 def su(serial, cmd):
@@ -52,6 +53,13 @@ def main():
     import adb_serial
     a.serial = adb_serial.resolve(a.serial)
 
+    # Identify by model + eMMC size. The env gate is geometry-independent (same u-boot
+    # on both units), so the box is allowed here: require_layout=False.
+    devices.identify(
+        lambda p: getprop(a.serial, p),
+        devices.sectors_reader(lambda cmd: su(a.serial, cmd)[0].decode("utf-8", "replace")),
+        require_layout=False, log=print)
+
     raw = read_env(a.serial)
     if len(raw) < envtool.ENV_SIZE or not envtool.crc_ok(raw)[0]:
         sys.exit("env read/CRC invalid")
@@ -79,8 +87,6 @@ def main():
         ce_slot = {"_a": "_b", "_b": "_a"}.get(active)
         if not ce_slot:
             sys.exit(f"no gate in env AND bad slot_suffix '{active}' -- cannot rebuild gate")
-        if getprop(a.serial, "ro.product.device") != "twilight":
-            sys.exit("device != twilight -- refusing to build a twilight env")
         default = a.default or "android"
         print(f"CE slot = {ce_slot} (from active {active}) | gate present: no "
               f"-> rebuilding full env (generic helpers + gate) | default: {default}")

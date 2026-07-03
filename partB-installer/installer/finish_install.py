@@ -18,6 +18,7 @@ import argparse, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import flash_to_coreelec as F  # noqa: E402
+import devices  # noqa: E402  -- stick/box discrimination registry
 
 
 def main():
@@ -33,8 +34,10 @@ def main():
 
     print(f"=== finish install (serial={a.serial} mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
     F.require_artifacts()
-    if g.getprop("ro.product.device") != "twilight":
-        sys.exit("device != twilight -- abort")
+    # Identify by model + eMMC size; geometry-dependent completion -> require_layout=True.
+    dev = devices.identify(g.getprop,
+                           devices.sectors_reader(lambda cmd: g.su(cmd)[0]),
+                           require_layout=True, log=print)
     if "uid=0" not in g.su("id")[0]:
         sys.exit("su root not available")
     g.pipefail = g.su("set -o pipefail 2>/dev/null && echo Y")[0].strip() == "Y"
@@ -55,7 +58,7 @@ def main():
     ce_slot = {"_a": "_b", "_b": "_a"}.get(active)
     if not ce_slot:
         sys.exit(f"bad slot_suffix '{active}'")
-    print(f"  device=twilight root=ok pipefail={g.pipefail} GPT=128 active={active} CE={ce_slot}")
+    print(f"  device={dev.slug} root=ok pipefail={g.pipefail} GPT=128 active={active} CE={ce_slot}")
 
     g.build_target_blobs(ce_slot)   # regenerates env_target.bin + misc_sector.bin from device
     if dry:

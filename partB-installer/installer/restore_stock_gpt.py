@@ -23,6 +23,8 @@ Source of truth, in priority order:
 import argparse, base64, os, struct, subprocess, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "build"))
+import devices  # noqa: E402  -- stick/box discrimination registry
 PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage0 dumps
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 DEST = os.path.join(HERE, "..", "pulled_backups_prerestore")
@@ -149,16 +151,14 @@ def main():
     verify_stock_files()
 
     # ---- device identity + size guard ----
+    # Identify by model + eMMC size (the constants below are the STICK's geometry;
+    # require_layout=True refuses the box until its layout/backups exist).
     print("\n-- device --")
-    dev = d.getprop("ro.product.device")
-    if dev != "twilight":
-        sys.exit(f"device='{dev}' != twilight -- WRONG MODEL. Abort.")
+    devices.identify(d.getprop,
+                     devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
+                     require_layout=True, log=print)
     if "uid=0" not in d.su("id")[0]:
         sys.exit("su root not available")
-    sz = d.su("cat /sys/class/block/mmcblk0/size")[0].strip()
-    if sz != str(TOTAL_SECTORS):
-        sys.exit(f"mmcblk0 size={sz} != {TOTAL_SECTORS} -- wrong disk geometry. Abort.")
-    print(f"  device=twilight root=ok mmcblk0={sz} sectors (match)")
 
     # ---- read current GPT ----
     print("\n-- current on-device GPT --")

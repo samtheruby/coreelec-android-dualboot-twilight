@@ -47,6 +47,8 @@ import argparse, os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
 PY = sys.executable
+sys.path.insert(0, os.path.join(HERE, "..", "build"))
+import devices  # noqa: E402  -- stick/box discrimination registry
 
 
 def run(script, *args):
@@ -198,22 +200,29 @@ def stage_magisk(a):
         print("  (no Magisk*.apk found in magisk/ or artifacts/ -- skipping APK install)")
 
     # ---- B. Locate the pre-patched init_boot image ------------------------------
+    # Pick the image by the IDENTIFIED unit (model + eMMC size), NOT by codename:
+    # stick and box both report device=twilight, so a codename-derived filename would
+    # hand the box the STICK's rooted init_boot and brick it. Rooting is geometry-
+    # independent, so require_layout=False (the box can be rooted before its carve
+    # layout exists). Runs pre-root -> plain adb shell (no su).
     img = getattr(a, "magisk_img", None) or ""
     if not img:
-        r = subprocess.run(["adb", "-s", a.serial, "shell", "getprop", "ro.product.device"],
-                           capture_output=True, text=True)
-        device = r.stdout.strip()
-        dev_name = f"{device}-init_boot-patched.img" if device else ""
-        candidates = []
-        if dev_name:
-            candidates += [os.path.join(magisk_dir, dev_name),
-                           os.path.join(ART, dev_name)]
-        candidates += [os.path.join(ART, "init_boot_patched.img"),
-                       os.path.join(HERE, "..", "init_boot_patched.img")]
+        gp = lambda p: adb(a.serial, "shell", "getprop", p,
+                           capture_output=True, text=True).stdout.strip()
+        rs = devices.sectors_reader(
+            lambda cmd: adb(a.serial, "shell", cmd, capture_output=True, text=True).stdout)
+        dev = devices.identify(gp, rs, require_layout=False, log=print)
+        candidates = [os.path.join(magisk_dir, dev.magisk_img),
+                      os.path.join(ART, dev.magisk_img),
+                      os.path.join(ART, "init_boot_patched.img"),
+                      os.path.join(HERE, "..", "init_boot_patched.img")]
         for c in candidates:
             if os.path.exists(c):
                 img = os.path.abspath(c)
                 break
+        if not img:
+            print(f"  (no init_boot image for {dev.name} found: expected "
+                  f"magisk/{dev.magisk_img})")
     if not img:
         return None  # signal to caller: no image found, skip
     if not os.path.exists(img):

@@ -24,7 +24,7 @@ import argparse, base64, gzip, hashlib, os, socket, subprocess, sys, struct, tim
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc, layout as L  # noqa: E402
+import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 
 DISK = "/dev/block/mmcblk0"
 GPT_BACKUP_LBA = 15_265_792
@@ -246,13 +246,17 @@ class Ctx:
     # ---- 1. preflight ------------------------------------------------------
     def preflight(self):
         print("\n-- preflight --")
-        dev = self.getprop("ro.product.device")
-        if dev != "twilight":
-            sys.exit(f"device='{dev}' != twilight -- WRONG MODEL. Abort.")
+        # Identify the physical unit by model + eMMC size (NOT the shared codename
+        # `twilight`, which the stick and box both report). require_layout=True: a
+        # geometry step must refuse any device whose carve layout isn't implemented.
+        self.device = devices.identify(
+            self.getprop,
+            devices.sectors_reader(lambda cmd: self.su(cmd)[0]),
+            require_layout=True, log=print)
         if "uid=0" not in self.su("id")[0]:
             sys.exit("su root not available")
         vbs = self.getprop("ro.boot.verifiedbootstate")
-        print(f"  device=twilight root=ok verifiedbootstate={vbs}"
+        print(f"  root=ok verifiedbootstate={vbs}"
               + ("" if vbs == "orange" else "  (WARN: expected orange)"))
         if not self.su(f"[ -x {NC.split()[0]} ] && echo y")[0].strip() == "y":
             sys.exit(f"{NC.split()[0]} not present -- need busybox for nc/gzip")
@@ -369,10 +373,16 @@ class Ctx:
 
     # ---- 5. re-guard + streamed writes -------------------------------------
     def reguard(self):
+        # Re-confirm the SAME identified unit is still attached (model + eMMC size)
+        # and still stock, immediately before the destructive writes -- guards against
+        # a device swap between preflight and write.
+        again = devices.identify(self.getprop,
+                                 devices.sectors_reader(lambda cmd: self.su(cmd)[0]),
+                                 require_layout=True)
         byname = self.su("ls /dev/block/by-name/ 2>/dev/null")[0]
-        if self.getprop("ro.product.device") != "twilight" \
+        if again.slug != getattr(self, "device", again).slug \
                 or "CE_FLASH" in byname or "CE_STORAGE" in byname:
-            sys.exit("re-guard failed (state changed) -- aborting before writes")
+            sys.exit("re-guard failed (device or state changed) -- aborting before writes")
 
     def write_all(self, ce_slot, skip_gpt=False, skip_sbwipe=False):
         s = secs()
