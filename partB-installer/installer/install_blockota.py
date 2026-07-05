@@ -13,8 +13,8 @@ needed. Then reboot to activate.
 import argparse, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# module source lives at ../app/blockota (repo) or ../blockota (shipped bundle)
-MOD = next((p for p in (os.path.join(HERE, "..", "app", "blockota"),
+# module source lives at ../modules/blockota (repo) or ../blockota (shipped bundle)
+MOD = next((p for p in (os.path.join(HERE, "..", "modules", "blockota"),
                         os.path.join(HERE, "..", "blockota"))
             if os.path.exists(os.path.join(p, "module.prop"))), None)
 MODID = "blockota_twilight"

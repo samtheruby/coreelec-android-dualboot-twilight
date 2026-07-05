@@ -17,8 +17,8 @@ the install, which would erase the module otherwise). Reboot to activate.
 import argparse, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# module source lives at ../app/toolbox_export (repo) or ../toolbox_export (bundle)
-MOD = next((p for p in (os.path.join(HERE, "..", "app", "toolbox_export"),
+# module source lives at ../modules/toolbox_export (repo) or ../toolbox_export (bundle)
+MOD = next((p for p in (os.path.join(HERE, "..", "modules", "toolbox_export"),
                         os.path.join(HERE, "..", "toolbox_export"))
             if os.path.exists(os.path.join(p, "module.prop"))), None)
 MODID = "toolbox_export"
@@ -43,7 +43,7 @@ def main():
         verify(a.serial)
         return
     if MOD is None:
-        sys.exit("toolbox_export module source not found (app/toolbox_export)")
+        sys.exit("toolbox_export module source not found (modules/toolbox_export)")
     if "uid=0" not in su(a.serial, "id")[0]:
         sys.exit("no root")
     if not su(a.serial, "[ -d /data/adb/magisk ] && echo y")[0].strip() == "y":

@@ -18,7 +18,8 @@ Reversible: --revert re-enables the components; remove the Magisk module to undo
 import argparse, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MOD = next((p for p in (os.path.join(HERE, "..", "app", "blockgms"),
+# module source lives at ../modules/blockgms (repo) or ../blockgms (shipped bundle)
+MOD = next((p for p in (os.path.join(HERE, "..", "modules", "blockgms"),
                         os.path.join(HERE, "..", "blockgms"))
             if os.path.exists(os.path.join(p, "module.prop"))), None)
 MODID = "blockgms_sysupdate"

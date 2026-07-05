@@ -33,9 +33,9 @@ INSTALLER = ["install.py", "adb_serial.py", "flash_to_coreelec.py", "deploy_flas
              "restore_stock_gpt.py", "restore_env_misc_factory.py", "finish_install.py"]
 REMOTE = ["99-xiaomi-remote.hwdb", "xiaomi.xml"]   # payload/remote -> dist/payload/remote
 FLASH = ["user-update.sh"]                          # payload/flash -> dist/flash (update-recovery hook)
-BLOCKOTA = ["module.prop", "service.sh"]            # app/blockota -> dist/blockota
-BLOCKGMS = ["module.prop", "service.sh"]            # app/blockgms -> dist/blockgms
-TOOLBOX_EXPORT = ["module.prop", "service.sh"]      # app/toolbox_export -> dist/toolbox_export
+BLOCKOTA = ["module.prop", "service.sh"]            # modules/blockota -> dist/blockota
+BLOCKGMS = ["module.prop", "service.sh"]            # modules/blockgms -> dist/blockgms
+TOOLBOX_EXPORT = ["module.prop", "service.sh"]      # modules/toolbox_export -> dist/toolbox_export
 ADDON_ZIP_GLOB = "script.coreelec.toolbox-*.zip"    # prebuilt CoreELEC Toolbox addon -> dist/artifacts
 ART_RAW = ["gpt_primary.bin", "gpt_backup.bin", "boota.img", "dtboa.img",
            "env_additions.json", "RebootToCoreELEC.apk"]
@@ -59,11 +59,11 @@ def main():
     for f in INSTALLER:
         shutil.copy2(os.path.join(ROOT, "installer", f), os.path.join(DIST, "installer", f))
     for f in BLOCKOTA:
-        shutil.copy2(os.path.join(ROOT, "app", "blockota", f), os.path.join(DIST, "blockota", f))
+        shutil.copy2(os.path.join(ROOT, "modules", "blockota", f), os.path.join(DIST, "blockota", f))
     for f in BLOCKGMS:
-        shutil.copy2(os.path.join(ROOT, "app", "blockgms", f), os.path.join(DIST, "blockgms", f))
+        shutil.copy2(os.path.join(ROOT, "modules", "blockgms", f), os.path.join(DIST, "blockgms", f))
     for f in TOOLBOX_EXPORT:
-        shutil.copy2(os.path.join(ROOT, "app", "toolbox_export", f),
+        shutil.copy2(os.path.join(ROOT, "modules", "toolbox_export", f),
                      os.path.join(DIST, "toolbox_export", f))
     for f in REMOTE:
         shutil.copy2(os.path.join(ROOT, "payload", "remote", f),

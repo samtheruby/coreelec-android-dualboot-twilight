@@ -45,6 +45,21 @@ partB-installer/artifacts/box/*
 partB-installer/dist/
 partB-installer/*.zip
 
+# Stray dist-output copies sometimes left in the repo ROOT by an old make_dist run.
+# Canonical sources live in modules/, payload/flash/, docs/. These regenerate into
+# dist/, so keep them on disk if present but out of git (avoids status noise).
+partB-installer/blockgms/
+partB-installer/blockota/
+partB-installer/toolbox_export/
+partB-installer/flash/
+partB-installer/INSTALL.md
+partB-installer/SHA256SUMS.txt
+partB-installer/installer/scripts.zip
+
+# docs/recon/: the collaborator's recon dump. CONTAINS DEVICE IDENTITY (adb serial
+# in the report, u-boot env.bin with MAC/keys). Kept for reference, never committed.
+partB-installer/docs/recon/
+
 # magisk/: device-specific Magisk-patched init_boot images (*.img gitignored;
 # the README explaining the naming convention IS tracked).
 partB-installer/magisk/*.img
