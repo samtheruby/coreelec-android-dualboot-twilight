@@ -211,12 +211,13 @@ Override with `--magisk-img <path>`. Use `--fastboot-serial <serial>` if multipl
 devices are connected.
 
 **Firmware-match guard.** A Magisk-patched `init_boot` only boots the exact stock build it was
-patched from — flashing a mismatched one can bootloop. Before flashing, `stage_magisk` reads the
-build fingerprint baked into the image (`ro.bootimage.build.fingerprint`, in the ramdisk's
-`build.prop`) and compares it to the unit's live value; on a mismatch it **aborts without flashing**
-and prints both fingerprints. If your unit is on a different build, either update it to the
-expected build, or patch your own `init_boot` (extract it from your OTA, patch it in the Magisk
-app) and pass `--magisk-img <path>` — which skips the guard.
+patched from — flashing a mismatched one can bootloop. The bundled images are patched from
+**HyperOS `V816.0.7.0`** (Android 14): stick `V816.0.7.0.UZFAATK`, box `V816.0.7.0.UZFAABX`.
+**Your unit must be on that build** — check with `adb shell getprop ro.bootimage.build.fingerprint`.
+Before flashing, `stage_magisk` reads the fingerprint baked into the image and compares it to the
+unit's live value; on a mismatch it **aborts without flashing** and prints both. If your unit is on
+a different build, either update it to `V816.0.7.0`, or patch your own `init_boot` (extract it from
+your OTA, patch it in the Magisk app) and pass `--magisk-img <path>` — which skips the guard.
 
 Only needed once per unit. If root is already active, skip it.
 

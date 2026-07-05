@@ -40,7 +40,11 @@ reads it back out of the image (`devices.boot_fingerprint_from_img`) and compare
 unit's live `ro.bootimage.build.fingerprint`. On a mismatch it **aborts without flashing** and
 prints both. There is no pin to maintain — the image is self-describing.
 
-If your unit is on a different build, either update it to the expected build, or patch your own
+The images shipped here are patched from **HyperOS `V816.0.7.0`** (Android 14): stick
+`V816.0.7.0.UZFAATK`, box `V816.0.7.0.UZFAABX`. Check a unit with
+`adb shell getprop ro.bootimage.build.fingerprint`.
+
+If your unit is on a different build, either update it to `V816.0.7.0`, or patch your own
 `init_boot` (below) and pass `--magisk-img <path>`, which skips the guard.
 
 ## Creating a patched image for a new device

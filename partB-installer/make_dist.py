@@ -208,10 +208,11 @@ The script automatically:
 If root is not immediately confirmed, open the Magisk app to complete any first-time setup,
 then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
 
-> **Firmware mismatch?** This bundle's `init_boot` is patched from one exact stock build. If your
-> unit is on a different build, stage_magisk refuses it -- either update the unit to that build, or
-> patch your own `init_boot` (extract from your OTA, patch in the Magisk app) and pass
-> `--magisk-img <path>`, which skips the guard.
+> **Required firmware: HyperOS `V816.0.7.0` (Android 14).** This bundle's `init_boot` is patched
+> from that exact build (stick `V816.0.7.0.UZFAATK`, box `V816.0.7.0.UZFAABX`). Check your unit with
+> `adb shell getprop ro.bootimage.build.fingerprint`. If it's on a different build, stage_magisk
+> refuses it -- either update the unit to `V816.0.7.0`, or patch your own `init_boot` (extract from
+> your OTA, patch in the Magisk app) and pass `--magisk-img <path>`, which skips the guard.
 
 ## Stage 0 -- preflight + backups (read-only)
 ```
