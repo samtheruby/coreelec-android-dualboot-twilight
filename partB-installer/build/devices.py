@@ -50,6 +50,7 @@ SEC_PER_MIB = MIB // SECTOR              # 2048
 class Device:
     def __init__(self, slug, model, codename, total_sectors,
                  magisk_img, layout_ready, name, notes="",
+                 boot_fingerprint=None,
                  carve_start_mib=None, carve_end_mib=None,
                  sizes_mib=None, order=None,
                  gpt_backup_lba=None, stock_ud_last_lba=None,
@@ -63,6 +64,12 @@ class Device:
         self.layout_ready = layout_ready    # False -> refuse geometry-dependent steps
         self.name = name                    # human label for logs
         self.notes = notes
+        # OPTIONAL manual override of the firmware build the shipped magisk_img was
+        # patched from. Normally left None: stage_magisk reads the expected fingerprint
+        # straight OUT of the image itself (ro.bootimage.build.fingerprint in the ramdisk
+        # build.prop -- see boot_fingerprint_from_img), so there is no pin to drift. Set
+        # this only if an image's ramdisk uses a compression we can't unpack.
+        self.boot_fingerprint = boot_fingerprint
         # ---- partition geometry (single source; consumed by layout.py, the GPT
         #      builder, and the installer) ----
         self.carve_start_mib = carve_start_mib   # start of the carve region (== stock userdata start)
@@ -229,6 +236,89 @@ def sectors_reader(su_text):
         out = su_text("cat /sys/class/block/mmcblk0/size").strip()
         return int(out.split()[0])
     return _read
+
+
+# ---------------------------------------------------------------------------
+# init_boot firmware-match guard (for stage_magisk)
+# ---------------------------------------------------------------------------
+# A pre-patched init_boot is bytewise tied to the exact stock build it was patched
+# from; flashing it onto a unit on a DIFFERENT build can bootloop. That build is
+# recorded INSIDE the image -- the ramdisk carries system/etc/ramdisk/build.prop
+# with ro.bootimage.build.fingerprint -- so we read it back and let stage_magisk
+# refuse a mismatch. No hardcoded pin, no drift.
+_BOOT_FP_KEY = b"ro.bootimage.build.fingerprint="
+
+
+def _lz4_legacy_decompress(data):
+    """Decode an lz4 'legacy' frame (magic 02 21 4c 18) -- Magisk's usual ramdisk
+    compression -- in pure Python (no external tools / deps)."""
+    import struct as _s
+    out = bytearray(); i = 4                        # skip the 4-byte magic
+    while i + 4 <= len(data):
+        bs = _s.unpack_from("<I", data, i)[0]; i += 4
+        if bs == 0 or bs > len(data) - i:
+            break
+        block = data[i:i + bs]; i += bs
+        j = 0; n = len(block)
+        while j < n:                                # one lz4 block = a run of sequences
+            tok = block[j]; j += 1
+            lit = tok >> 4
+            if lit == 15:
+                while True:
+                    b = block[j]; j += 1; lit += b
+                    if b != 255: break
+            out += block[j:j + lit]; j += lit
+            if j >= n:
+                break
+            off = block[j] | (block[j + 1] << 8); j += 2
+            m = tok & 15
+            if m == 15:
+                while True:
+                    b = block[j]; j += 1; m += b
+                    if b != 255: break
+            m += 4; st = len(out) - off
+            for k in range(m):                      # match copy (may overlap)
+                out.append(out[st + k])
+    return bytes(out)
+
+
+def _ramdisk_bytes(img):
+    """Decompressed ramdisk of an Android boot/init_boot image (header v3/v4).
+    Handles lz4-legacy / gzip / xz; returns the raw ramdisk if uncompressed."""
+    import struct as _s
+    if img[:8] != b"ANDROID!":
+        return b""
+    ks, rs = _s.unpack_from("<II", img, 8)
+    off = 4096 + ((ks + 4095) // 4096) * 4096       # ramdisk follows the page-aligned kernel
+    rd = img[off:off + rs]
+    if rd[:4] == b"\x02\x21\x4c\x18":
+        return _lz4_legacy_decompress(rd)
+    if rd[:2] == b"\x1f\x8b":
+        import gzip; return gzip.decompress(rd)
+    if rd[:5] == b"\xfd7zXZ":
+        import lzma; return lzma.decompress(rd)
+    return rd                                        # uncompressed cpio -> substring search still works
+
+
+def boot_fingerprint_from_img(path):
+    """ro.bootimage.build.fingerprint baked into a boot/init_boot image, or None if it
+    can't be read (unknown ramdisk format / prop absent)."""
+    try:
+        raw = _ramdisk_bytes(open(path, "rb").read())
+    except Exception:
+        return None
+    idx = raw.find(_BOOT_FP_KEY)
+    if idx < 0:
+        return None
+    end = raw.find(b"\n", idx)
+    end = len(raw) if end < 0 else end
+    return raw[idx + len(_BOOT_FP_KEY):end].decode("latin1").strip() or None
+
+
+def expected_boot_fingerprint(dev, img_path):
+    """The build fingerprint the shipped init_boot must match: read from the image,
+    or the device's manual override if set."""
+    return dev.boot_fingerprint or boot_fingerprint_from_img(img_path)
 
 
 if __name__ == "__main__":

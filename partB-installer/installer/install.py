@@ -223,6 +223,25 @@ def stage_magisk(a):
         if not img:
             print(f"  (no init_boot image for {dev.name} found: expected "
                   f"magisk/{dev.magisk_img})")
+        elif img:
+            # Firmware-match guard. A pre-patched init_boot is tied to the EXACT stock
+            # build it was patched from (ro.bootimage.build.fingerprint, baked into the
+            # image); flashing it onto a unit on a different build can bootloop. Refuse
+            # on mismatch. (Skipped entirely when the user supplies their own --magisk-img.)
+            want = devices.expected_boot_fingerprint(dev, img)
+            have = gp("ro.bootimage.build.fingerprint") or gp("ro.build.fingerprint")
+            if want is None:
+                sys.exit(f"could not read the firmware fingerprint from "
+                         f"{os.path.basename(img)} -- refusing to flash it blindly. Patch "
+                         f"your own init_boot for this unit and pass --magisk-img.")
+            if have != want:
+                sys.exit(f"FIRMWARE MISMATCH -- refusing to flash the bundled init_boot.\n"
+                         f"  this {dev.name} is on: {have or '(unknown)'}\n"
+                         f"  bundled {dev.magisk_img} patched from: {want}\n"
+                         f"Flashing a mismatched init_boot can bootloop. Update the unit to "
+                         f"that build, or patch your own init_boot for THIS build and pass "
+                         f"--magisk-img.")
+            print(f"  firmware match OK: {have}")
     if not img:
         return None  # signal to caller: no image found, skip
     if not os.path.exists(img):
