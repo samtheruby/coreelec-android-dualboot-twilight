@@ -587,8 +587,8 @@ class Ctx:
         Why not just the superblock wipe: a clean `adb reboot` unmounts /data and
         flushes the cached ORIGINAL superblock back over our zeros, so no reformat
         fires -- the f2fs stays at the OLD full-userdata size on the now-smaller
-        partition (df shows ~4176 MiB on a 2376 MiB device; it mounts but will
-        I/O-error once usage crosses the partition end). Deterministic fix: set the
+        partition (df shows the old full carve size on the smaller userdata; it
+        mounts but will I/O-error once usage crosses the partition end). Deterministic fix: set the
         bootloader control block (BCB, at misc offset 0) command='boot-recovery' and
         recovery='recovery\\n--wipe_data\\n'. The next reboot enters recovery, which
         mkfs's userdata to the NEW partition size and re-keys metadata encryption,

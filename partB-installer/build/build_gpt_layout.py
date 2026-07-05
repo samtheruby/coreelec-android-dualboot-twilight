@@ -4,7 +4,7 @@ Build the FINAL 128-entry GPT for a stock twilight unit, with the dual-boot
 layout already applied. Output: two raw blobs to dd straight onto mmcblk0.
 
   gpt_primary.bin  -> dd seek=0            (LBA 0..33, 34 sectors)
-  gpt_backup.bin   -> dd seek=15265792     (the last-2M region: entry array + alt header)
+  gpt_backup.bin   -> dd seek=<device.gpt_backup_lba>   (backup-GPT region: entry array + alt header)
 
 Starts from the STOCK GPT reference (refdata/stock_gpt_first2m.bin +
 stock_gpt_last2m.bin -- identity-free: only random partition GUIDs + generic

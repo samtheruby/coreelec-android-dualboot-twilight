@@ -5,7 +5,7 @@ modified (old manual layout, or a previous install). This reverts userdata to it
 full span and removes the CE_FLASH / CE_STORAGE entries, so flash_to_coreelec.py's
 preflight passes and a clean canonical 2676/850/650 install can be (re)applied.
 
-Only the GPT is touched (primary @ LBA 0..33 and backup @ 15265792..). No file
+Only the GPT is touched (primary @ LBA 0..33 and backup @ the device's backup-GPT LBA). No file
 system or partition data is moved; the GPT region is not mounted, so writing it
 while userdata is mounted is safe (no overlap / no read-during-overwrite). The
 running kernel keeps the old table cached until you REBOOT -- that's expected.
