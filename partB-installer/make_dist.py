@@ -17,13 +17,16 @@ Bundle layout (mirrors the repo so the driver's imports work unchanged):
     flash/      user-update.sh   (CoreELEC OS-update self-heal hook)
     INSTALL.md  SHA256SUMS.txt
 """
-import os, glob, shutil, gzip, zipfile, hashlib
+import os, glob, shutil, gzip, zipfile, hashlib, argparse, sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(ROOT, "artifacts")
-DIST = os.path.join(ROOT, "dist")
+sys.path.insert(0, os.path.join(ROOT, "build"))
+import devices  # noqa: E402
 
-BUILD_PY = ["envtool.py", "build_env.py", "ab_misc.py", "layout.py"]
+# Runtime modules the installer imports (layout imports devices; flash_to_coreelec
+# imports all of these). devices.py MUST ride along or the bundle fails to import.
+BUILD_PY = ["envtool.py", "build_env.py", "ab_misc.py", "layout.py", "devices.py"]
 INSTALLER = ["install.py", "adb_serial.py", "flash_to_coreelec.py", "deploy_flash_recovery.py",
              "reassert_env_gate.py", "install_blockgms.py", "install_blockota.py",
              "install_toolbox_export.py", "deploy_toolbox_addon.py",
@@ -37,9 +40,11 @@ BLOCKOTA = ["module.prop", "service.sh"]            # modules/blockota -> dist/b
 BLOCKGMS = ["module.prop", "service.sh"]            # modules/blockgms -> dist/blockgms
 TOOLBOX_EXPORT = ["module.prop", "service.sh"]      # modules/toolbox_export -> dist/toolbox_export
 ADDON_ZIP_GLOB = "script.coreelec.toolbox-*.zip"    # prebuilt CoreELEC Toolbox addon -> dist/artifacts
-ART_RAW = ["gpt_primary.bin", "gpt_backup.bin", "boota.img", "dtboa.img",
-           "env_additions.json", "RebootToCoreELEC.apk"]
-ART_GZ = ["ce_flash.img", "ce_storage.img"]   # shipped gzipped
+# Per-device flashables live in artifacts/<slug>/ and ship into dist/artifacts/<slug>/
+# (the installer reads artifacts/<identified-device-slug>/). Generic ones stay flat.
+ART_DEV_RAW = ["gpt_primary.bin", "gpt_backup.bin", "boota.img", "dtboa.img"]
+ART_DEV_GZ = ["ce_flash.img", "ce_storage.img"]     # per-device, shipped gzipped
+ART_GENERIC = ["env_additions.json", "RebootToCoreELEC.apk"]   # device-agnostic (flat)
 
 
 def gzip_to(src, dst):
@@ -48,10 +53,20 @@ def gzip_to(src, dst):
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Assemble a per-device installer bundle.")
+    ap.add_argument("--device", default="stick", choices=list(devices.BY_SLUG),
+                    help="which device to bundle (default: stick)")
+    args = ap.parse_args()
+    dev = devices.BY_SLUG[args.device]
+    art_dev = os.path.join(ART, dev.slug)              # artifacts/<slug>/ (per-device flashables)
+    DIST = os.path.join(ROOT, "dist", dev.slug)        # build output dir (gitignored)
+    print(f"=== make_dist for [{dev.slug}] {dev.name} -> dist/{dev.slug}/ ===")
+
     if os.path.isdir(DIST):
         shutil.rmtree(DIST)
-    for sub in ("build", "installer", "artifacts", "blockota", "blockgms", "toolbox_export",
-                "flash", "magisk", os.path.join("payload", "remote")):
+    for sub in ("build", "installer", os.path.join("artifacts", dev.slug),
+                "blockota", "blockgms", "toolbox_export", "flash", "magisk",
+                os.path.join("payload", "remote")):
         os.makedirs(os.path.join(DIST, sub))
 
     for f in BUILD_PY:
@@ -70,32 +85,48 @@ def main():
                      os.path.join(DIST, "payload", "remote", f))
     for f in FLASH:   # update-recovery hook -> dist/flash (deploy_flash_recovery.py fallback path)
         shutil.copy2(os.path.join(ROOT, "payload", "flash", f), os.path.join(DIST, "flash", f))
-    # magisk/: copy all files (APK + any pre-patched .img)
+
+    # magisk/: the Magisk APK + THIS device's patched init_boot + README. Skip other
+    # devices' *.img so the bundle carries only the image that matches its target.
     magisk_src = os.path.join(ROOT, "magisk")
     for f in os.listdir(magisk_src):
+        if f.endswith(".img") and f != dev.magisk_img:
+            continue
         src = os.path.join(magisk_src, f)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(DIST, "magisk", f))
+    if not os.path.exists(os.path.join(DIST, "magisk", dev.magisk_img)):
+        print(f"  WARNING: magisk/{dev.magisk_img} not found -- bundle has no patched "
+              f"init_boot for {dev.slug} (stage_magisk will need --magisk-img)")
 
-    addon_zips = sorted(glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
+    # generic (flat) artifacts + the prebuilt CoreELEC Toolbox addon zip
+    addon_zips = sorted(glob.glob(os.path.join(ART, ADDON_ZIP_GLOB)) +
+                        glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
     if not addon_zips:
-        raise SystemExit(f"missing prebuilt addon zip ({ADDON_ZIP_GLOB}) in {ROOT}")
+        raise SystemExit(f"missing prebuilt addon zip ({ADDON_ZIP_GLOB}) in artifacts/")
     shutil.copy2(addon_zips[-1], os.path.join(DIST, "artifacts", os.path.basename(addon_zips[-1])))
-    for f in ART_RAW:
+    for f in ART_GENERIC:
         shutil.copy2(os.path.join(ART, f), os.path.join(DIST, "artifacts", f))
-    for f in ART_GZ:
-        dst = os.path.join(DIST, "artifacts", f + ".gz")
-        src_gz = os.path.join(ART, f + ".gz")
-        src_raw = os.path.join(ART, f)
+
+    # per-device flashables -> dist/artifacts/<slug>/
+    for f in ART_DEV_RAW:
+        shutil.copy2(os.path.join(art_dev, f), os.path.join(DIST, "artifacts", dev.slug, f))
+    for f in ART_DEV_GZ:
+        dst = os.path.join(DIST, "artifacts", dev.slug, f + ".gz")
+        src_gz = os.path.join(art_dev, f + ".gz")
+        src_raw = os.path.join(art_dev, f)
         if os.path.exists(src_gz):
-            print(f"  copy {f}.gz ...", end="", flush=True)
+            print(f"  copy {dev.slug}/{f}.gz ...", end="", flush=True)
             shutil.copy2(src_gz, dst)
-        else:
-            print(f"  gzip {f} ...", end="", flush=True)
+        elif os.path.exists(src_raw):
+            print(f"  gzip {dev.slug}/{f} ...", end="", flush=True)
             gzip_to(src_raw, dst)
+        else:
+            raise SystemExit(f"missing {dev.slug}/{f}[.gz] -- run build/build_all.py --device {dev.slug}")
         print(f" {os.path.getsize(dst)//1048576} MiB")
 
-    open(os.path.join(DIST, "INSTALL.md"), "w", newline="\n", encoding="utf-8").write(INSTALL_MD)
+    open(os.path.join(DIST, "INSTALL.md"), "w", newline="\n", encoding="utf-8").write(
+        INSTALL_MD.replace("{DEVICE}", dev.name))
 
     # SHA256SUMS
     lines = []
@@ -106,8 +137,8 @@ def main():
             lines.append(f"{h}  {os.path.relpath(p, DIST).replace(os.sep, '/')}")
     open(os.path.join(DIST, "SHA256SUMS.txt"), "w", newline="\n").write("\n".join(lines) + "\n")
 
-    # zip
-    zpath = os.path.join(ROOT, "partB-installer-dist.zip")
+    # zip -> partB-installer-<slug>-dist.zip (internal root: partB-installer/)
+    zpath = os.path.join(ROOT, f"partB-installer-{dev.slug}-dist.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:   # images already gz
         for r, _, fs in os.walk(DIST):
             for f in fs:
@@ -116,7 +147,7 @@ def main():
 
     total = sum(os.path.getsize(os.path.join(r, f))
                 for r, _, fs in os.walk(DIST) for f in fs)
-    print(f"\ndist/ = {total//1048576} MiB   zip = {os.path.getsize(zpath)//1048576} MiB -> {zpath}")
+    print(f"\n[{dev.slug}] dist = {total//1048576} MiB   zip = {os.path.getsize(zpath)//1048576} MiB -> {os.path.basename(zpath)}")
     print("contents:")
     for r, _, fs in os.walk(DIST):
         for f in sorted(fs):
@@ -124,12 +155,13 @@ def main():
             print(f"  {os.path.relpath(p, DIST):<40} {os.path.getsize(p):>12,} B")
 
 
-INSTALL_MD = """# CoreELEC internal dual-boot installer -- staged (Xiaomi TV Stick 2nd Gen `twilight`)
+INSTALL_MD = """# CoreELEC internal dual-boot installer -- staged ({DEVICE})
 
 Self-contained. Needs only **Python 3** + **adb** and a **stock, rooted, unlocked
-`twilight`** (Amlogic s7d / S905X5M). No WSL / build step.
+{DEVICE}** (Amlogic s7d / S905X5M). No WSL / build step.
 
-> Stage 1 ONLY for `twilight`. It shrinks/erases userdata (factory-reset-like);
+> Stage 1 is locked to the {DEVICE} (identified by model + eMMC size). It
+> shrinks/erases userdata (factory-reset-like);
 > pre-flight refuses non-stock / already-modified units. Stage 2's app + GMS block
 > are generic to Google/Android TV; stage 2a is Xiaomi-only.
 
@@ -176,7 +208,7 @@ then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root
 ```
 python installer/install.py stage0 --serial <ip:port>
 ```
-Checks stock/rooted/twilight and pulls per-region backups to `pulled_backups/`.
+Checks it is a stock, rooted {DEVICE} and pulls per-region backups to `pulled_backups/`.
 
 ## Stage 1 -- CORE install  (DESTRUCTIVE; ends at first reboot)
 ```
