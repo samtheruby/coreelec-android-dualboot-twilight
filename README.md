@@ -106,9 +106,11 @@ With **USB connected** (required for the fastboot flash step), run:
 ```
 python installer/install.py stage_magisk --serial <ip:port>
 ```
-The script installs the bundled Magisk APK, reboots into the bootloader, flashes the
-pre-patched `init_boot_a`, and reboots back to Android. If root is not immediately confirmed,
-open the Magisk app to complete first-time setup, then verify: `adb shell su -c id` → `uid=0`.
+The script installs the bundled Magisk APK, identifies the unit and picks its patched
+`init_boot`, **verifies that image matches the unit's exact firmware build** (aborts rather than
+risk a bootloop on a mismatch), then flashes the **active slot's** `init_boot` and reboots to
+Android. If root is not immediately confirmed, open the Magisk app to complete first-time setup,
+then verify: `adb shell su -c id` → `uid=0`.
 
 **5. Back up + preflight (safe, no changes)**
 ```
@@ -196,8 +198,9 @@ Android setup and re-enable ADB before `stage_magisk`. **Requires USB for fastbo
 ```
 python installer/install.py stage_magisk --serial <ip:port>
 ```
-Reboots the stick into the fastboot bootloader, flashes `init_boot_a` with the Magisk-patched image,
-then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone isn't enough).
+Reboots the unit into the fastboot bootloader, flashes the **active slot's** `init_boot` with the
+Magisk-patched image, then reboots back to Android. **Requires USB for fastboot** (WiFi ADB alone
+isn't enough).
 
 The image is chosen from the **device registry** (`build/devices.py`): the installer
 identifies the unit by `ro.product.model` (cross-checked against the eMMC sector count) and
@@ -206,6 +209,14 @@ stick. It does **not** key off the codename, because the stick and the TV Box S 
 report `device=twilight`. Falls back to `artifacts/` and the bundle root for compatibility.
 Override with `--magisk-img <path>`. Use `--fastboot-serial <serial>` if multiple fastboot
 devices are connected.
+
+**Firmware-match guard.** A Magisk-patched `init_boot` only boots the exact stock build it was
+patched from — flashing a mismatched one can bootloop. Before flashing, `stage_magisk` reads the
+build fingerprint baked into the image (`ro.bootimage.build.fingerprint`, in the ramdisk's
+`build.prop`) and compares it to the unit's live value; on a mismatch it **aborts without flashing**
+and prints both fingerprints. If your unit is on a different build, either update it to the
+expected build, or patch your own `init_boot` (extract it from your OTA, patch it in the Magisk
+app) and pass `--magisk-img <path>` — which skips the guard.
 
 Only needed once per unit. If root is already active, skip it.
 

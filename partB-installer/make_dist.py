@@ -189,7 +189,7 @@ scratch** (skip Google sign-in if you like), re-enable Developer options + ADB, 
 then run stage_magisk.
 
 ## Stage_magisk -- install Magisk and flash patched init_boot (run before stage 0)
-If the stick is not yet rooted, use this step to get root before stage 0 requires it. The
+If the unit is not yet rooted, use this step to get root before stage 0 requires it. The
 bootloader must be **unlocked** first (see stage_unlock).
 
 With **USB connected** (required for the fastboot flash), run:
@@ -198,11 +198,20 @@ python installer/install.py stage_magisk --serial <ip:port>
 ```
 The script automatically:
 1. Installs the bundled Magisk APK via adb
-2. Reboots into the bootloader and flashes the pre-patched `init_boot` of the active slot
-3. Reboots back to Android and verifies root
+2. Identifies the unit (model + eMMC size) and picks its bundled patched `init_boot`
+3. **Firmware-match guard:** reads the build fingerprint baked into that image
+   (`ro.bootimage.build.fingerprint`) and compares it to the unit's live value -- if they
+   differ it **aborts without flashing** (a mismatched init_boot can bootloop)
+4. Reboots into the bootloader and flashes the pre-patched `init_boot` of the **active slot**
+5. Reboots back to Android and verifies root
 
 If root is not immediately confirmed, open the Magisk app to complete any first-time setup,
 then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
+
+> **Firmware mismatch?** This bundle's `init_boot` is patched from one exact stock build. If your
+> unit is on a different build, stage_magisk refuses it -- either update the unit to that build, or
+> patch your own `init_boot` (extract from your OTA, patch in the Magisk app) and pass
+> `--magisk-img <path>`, which skips the guard.
 
 ## Stage 0 -- preflight + backups (read-only)
 ```

@@ -31,6 +31,18 @@ python installer/install.py stage_magisk --serial <ip:port>
 The script installs the Magisk APK, identifies the unit, flashes that unit's pre-patched
 `init_boot` into the **active slot** via fastboot, and reboots back to Android.
 
+## Firmware-match guard
+
+A Magisk-patched `init_boot` only boots the **exact stock build** it was patched from —
+flashing it onto a unit on a different build can bootloop. Each image records that build in
+its ramdisk `build.prop` (`ro.bootimage.build.fingerprint`), so before flashing `stage_magisk`
+reads it back out of the image (`devices.boot_fingerprint_from_img`) and compares it to the
+unit's live `ro.bootimage.build.fingerprint`. On a mismatch it **aborts without flashing** and
+prints both. There is no pin to maintain — the image is self-describing.
+
+If your unit is on a different build, either update it to the expected build, or patch your own
+`init_boot` (below) and pass `--magisk-img <path>`, which skips the guard.
+
 ## Creating a patched image for a new device
 
 If the pre-patched image for your device is not included (or you want to patch against a newer firmware):
