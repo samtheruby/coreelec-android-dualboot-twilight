@@ -24,15 +24,17 @@ and confirms the 3 carve partitions match build.layout exactly.
 This is the single most dangerous artifact (a bad CRC = unbootable GPT), so it
 refuses to write unless every check passes.
 """
-import struct, zlib, os, uuid, sys
+import struct, zlib, os, uuid, sys, argparse
 import layout as L
+import devices
 
-BK = os.path.join(os.path.dirname(__file__), "..", "refdata")
-OUT = os.path.join(os.path.dirname(__file__), "..", "artifacts")
+ROOT = os.path.join(os.path.dirname(__file__), "..")
 SECTOR = L.SECTOR
-BACK_START_LBA = 15_265_792             # where stock_gpt_last2m.bin begins
 NEW_NUM = 128
 ARR_BYTES = NEW_NUM * 128               # 16384
+# refdata (per device): refdata/<slug>/stock_gpt_first2m.bin + stock_gpt_last2m.bin
+# output  (per device): artifacts/<slug>/gpt_primary.bin + gpt_backup.bin
+# BACK_START_LBA (where the stock backup blob begins) = device.gpt_backup_lba.
 
 # fixed unique GUIDs for the two new partitions (baked into the shipped image;
 # identical across flashed units, like any factory image -- acceptable).
@@ -90,6 +92,17 @@ def rebuild_crcs(buf, hdr_off, arr_off):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--device", default="stick", choices=list(devices.BY_SLUG),
+                    help="which device's GPT to build (default: stick)")
+    args = ap.parse_args()
+    dev = devices.BY_SLUG[args.device]
+    BK = os.path.join(ROOT, "refdata", dev.slug)
+    OUT = os.path.join(ROOT, "artifacts", dev.slug)
+    BACK_START_LBA = dev.gpt_backup_lba
+    print(f"== GPT for [{dev.slug}] {dev.name}  refdata={dev.slug}/ out=artifacts/{dev.slug}/ "
+          f"backup_lba={BACK_START_LBA:,} ==")
+
     prim = bytearray(open(os.path.join(BK, "stock_gpt_first2m.bin"), "rb").read())
     back = bytearray(open(os.path.join(BK, "stock_gpt_last2m.bin"), "rb").read())
 
@@ -116,7 +129,7 @@ def main():
     ud_last  = struct.unpack_from("<Q", ud, 40)[0]
     print(f"stock userdata = slot {ud_idx} (p{ud_idx+1}), LBA {ud_first}..{ud_last}")
 
-    secs = {n: (s, e, c) for n, s, e, c in L.as_sectors()}
+    secs = {n: (s, e, c) for n, s, e, c in L.as_sectors(dev)}
     assert ud_first == secs["userdata"][0], \
         f"layout userdata start {secs['userdata'][0]} != stock {ud_first}"
 

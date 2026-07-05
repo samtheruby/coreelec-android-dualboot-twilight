@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# Build ce_flash.img: 850 MiB FAT32 (label CE_FLASH) preloaded with the verified
-# CoreELEC payload. Run under WSL (needs mkfs.vfat + mtools).
+# Build ce_flash.img: FAT32 (label CE_FLASH) preloaded with the verified CoreELEC
+# payload. Run under WSL (needs mkfs.vfat + mtools).
 #
-# Size MUST equal the GPT CE_FLASH partition (build/layout.py: 850 MiB) so the
-# filesystem spans the whole partition when dd'd on.
+# Usage: build_ce_flash.sh [device_slug]   (default: stick)
+#
+# The payload (payload/flash/*) is shared across devices (same SoC + CoreELEC
+# build); only the FAT SIZE differs per device. Size MUST equal that device's GPT
+# CE_FLASH partition (build/devices.py) so the filesystem spans the whole partition
+# when dd'd on. Output -> artifacts/<slug>/ce_flash.img.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+DEV="${1:-stick}"
 FLASH="$HERE/../payload/flash"
-OUT="$HERE/../artifacts"
+OUT="$HERE/../artifacts/$DEV"
 IMG="$OUT/ce_flash.img"
-SIZE_MIB=$(python3 -c "import sys;sys.path.insert(0,'$HERE');import layout;print(layout.SIZES_MIB['CE_FLASH'])")   # from build/layout.py
+SIZE_MIB=$(python3 -c "import sys;sys.path.insert(0,'$HERE');import devices;print(devices.BY_SLUG['$DEV'].sizes_mib['CE_FLASH'])")   # from build/devices.py
 
+echo "== [$DEV] ce_flash: ${SIZE_MIB} MiB FAT32 -> artifacts/$DEV/ =="
 mkdir -p "$OUT"
 rm -f "$IMG"
 

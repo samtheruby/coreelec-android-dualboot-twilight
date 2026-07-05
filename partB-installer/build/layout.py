@@ -1,44 +1,24 @@
 #!/usr/bin/env python3
 """
-Single source of truth for the twilight (Amlogic s7d / S905X5M) internal
-dual-boot partition layout. Every PC-side builder AND the on-device installer
-read their geometry from here (the installer imports the JSON dump).
+Partition-layout geometry for the CoreELEC internal dual-boot.
 
-Device facts (verified, see CoreELEC-internal-dualboot-twilight.md):
-  eMMC mmcblk0 = 15,269,888 sectors x 512 B = 7.28 GiB
-  GPT, 32 entries originally -> expanded non-destructively to 128.
-  userdata (orig p32) span = sectors 6,713,344 .. 15,265,791
-                            = 3278 MiB .. 7454 MiB  (4176 MiB carve region)
+The per-device geometry now lives in build/devices.py (the single registry that
+also drives stick/box discrimination). This module is the thin computation layer:
+given a Device, it yields the carved partition table, and it re-exports the
+device-generic constants (sector size, type GUIDs).
 
-We carve that one span into 3 partitions. Partition NUMBER is irrelevant for
-boot (CoreELEC finds CE_FLASH / CE_STORAGE by LABEL via Linux); only userdata's
-name matters so Android reformats it by-name on first boot.
+Back-compat: every function defaults to the STICK device, and the old module-level
+constants (TOTAL_SECTORS, CARVE_*, SIZES_MIB, ORDER) still resolve to the stick's
+values, so existing stick callers keep working unchanged. New/box-aware callers
+pass an explicit device: `layout.as_sectors(dev)`.
+
+We carve the original userdata span into 3 partitions. Partition NUMBER is
+irrelevant for boot (CoreELEC finds CE_FLASH / CE_STORAGE by LABEL via Linux);
+only userdata's name matters so Android reformats it by-name on first boot.
 """
 import json
-
-SECTOR = 512
-TOTAL_SECTORS = 15_269_888              # whole eMMC
-MIB = 1024 * 1024
-SEC_PER_MIB = MIB // SECTOR             # 2048
-
-# --- carve region (the original userdata span) -------------------------------
-CARVE_START_MIB = 3278                  # = sector 6_713_344
-CARVE_END_MIB   = 7454                  # = sector 15_265_792 (== last_usable+1)
-CARVE_TOTAL_MIB = CARVE_END_MIB - CARVE_START_MIB   # 4176
-
-# --- the rebalanced layout (Android bigger; see doc B2) ----------------------
-# Sizes MUST sum to CARVE_TOTAL_MIB (4176). userdata up ~550M vs first build.
-SIZES_MIB = {
-    "userdata":   2376,   # Android user storage
-    "CE_FLASH":    600,   # FAT32: kernel.img + SYSTEM(347M) + recovery/dtb/dovi (~381M used);
-                          #        update rm's old SYSTEM then dd's new in place (1x, not 2x),
-                          #        so 600 leaves ~200M growth margin (verified in CE initramfs).
-    "CE_STORAGE": 1200,   # ext4: CoreELEC /storage. Update extracts the WHOLE tar to
-                          #       /storage/.update/.tmp while the tar still exists -> ~770-790M
-                          #       transient peak; +<200M user data fits in 1200 (~180M margin).
-}
-# Order in which they are laid out across the carve region (low -> high MiB).
-ORDER = ["userdata", "CE_FLASH", "CE_STORAGE"]
+import devices
+from devices import SECTOR, MIB, SEC_PER_MIB, STICK, BOX  # noqa: F401 (re-export)
 
 # --- GPT partition type GUIDs (mixed-endian, on-disk byte form) --------------
 # userdata keeps its ORIGINAL type+unique GUID (copied from the live GPT at
@@ -46,52 +26,69 @@ ORDER = ["userdata", "CE_FLASH", "CE_STORAGE"]
 GUID_LINUX_FS = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"   # CE_STORAGE (ext4)
 GUID_MS_BASIC = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"   # CE_FLASH (FAT32 / basic data)
 
-
-def partitions():
-    """Yield (name, start_mib, end_mib, size_mib) in layout order."""
-    cur = CARVE_START_MIB
-    out = []
-    for name in ORDER:
-        size = SIZES_MIB[name]
-        out.append((name, cur, cur + size, size))
-        cur += size
-    assert cur == CARVE_END_MIB, f"layout sums to {cur} MiB, expected {CARVE_END_MIB}"
-    return out
+# --- back-compat aliases: default (stick) geometry as module-level names ------
+TOTAL_SECTORS = STICK.total_sectors
+CARVE_START_MIB = STICK.carve_start_mib
+CARVE_END_MIB = STICK.carve_end_mib
+CARVE_TOTAL_MIB = STICK.carve_total_mib
+SIZES_MIB = STICK.sizes_mib
+ORDER = STICK.order
 
 
-def as_sectors():
-    """Same, but (name, start_lba, end_lba_inclusive, count_sectors)."""
-    out = []
-    for name, s_mib, e_mib, _ in partitions():
-        start = s_mib * SEC_PER_MIB
-        end   = e_mib * SEC_PER_MIB - 1          # GPT last_lba is inclusive
-        out.append((name, start, end, end - start + 1))
-    return out
+def _dev(dev):
+    return dev if dev is not None else STICK
 
 
-def dump_json():
+def partitions(dev=None):
+    """(name, start_mib, end_mib, size_mib) in layout order, for `dev` (default stick)."""
+    return _dev(dev).partitions()
+
+
+def as_sectors(dev=None):
+    """(name, start_lba, end_lba_inclusive, count_sectors) for `dev` (default stick)."""
+    return _dev(dev).as_sectors()
+
+
+def dump_json(dev=None):
+    d = _dev(dev)
     return json.dumps({
+        "device": d.slug,
+        "model": d.model,
         "sector": SECTOR,
-        "total_sectors": TOTAL_SECTORS,
-        "carve_start_mib": CARVE_START_MIB,
-        "carve_end_mib": CARVE_END_MIB,
-        "sizes_mib": SIZES_MIB,
-        "order": ORDER,
+        "total_sectors": d.total_sectors,
+        "carve_start_mib": d.carve_start_mib,
+        "carve_end_mib": d.carve_end_mib,
+        "sizes_mib": d.sizes_mib,
+        "order": d.order,
+        "gpt_backup_lba": d.gpt_backup_lba,
+        "stock_ud_last_lba": d.stock_ud_last_lba,
         "sectors": [
             {"name": n, "start_lba": s, "end_lba": e, "count": c}
-            for n, s, e, c in as_sectors()
+            for n, s, e, c in d.as_sectors()
         ],
     }, indent=2)
 
 
-if __name__ == "__main__":
-    assert sum(SIZES_MIB.values()) == CARVE_TOTAL_MIB, \
-        f"sizes sum {sum(SIZES_MIB.values())} != carve {CARVE_TOTAL_MIB}"
-    print(f"carve region: {CARVE_START_MIB}..{CARVE_END_MIB} MiB ({CARVE_TOTAL_MIB} MiB)")
+def _print(dev):
+    d = _dev(dev)
+    assert sum(d.sizes_mib.values()) == d.carve_total_mib, \
+        f"sizes sum {sum(d.sizes_mib.values())} != carve {d.carve_total_mib}"
+    print(f"[{d.slug}] {d.name}  eMMC={d.total_sectors:,} sectors")
+    print(f"carve region: {d.carve_start_mib}..{d.carve_end_mib} MiB ({d.carve_total_mib} MiB)")
     print(f"{'name':<12} {'start_mib':>9} {'end_mib':>8} {'size_mib':>8}  "
           f"{'start_lba':>10} {'end_lba':>10} {'sectors':>9}")
-    secs = dict((n, (s, e, c)) for n, s, e, c in as_sectors())
-    for name, s_mib, e_mib, size in partitions():
+    secs = {n: (s, e, c) for n, s, e, c in d.as_sectors()}
+    for name, s_mib, e_mib, size in d.partitions():
         s, e, c = secs[name]
         print(f"{name:<12} {s_mib:>9} {e_mib:>8} {size:>8}  {s:>10} {e:>10} {c:>9}")
-    print("\nlayout valid (sums to carve region).")
+    print("layout valid (sums to carve region).\n")
+
+
+if __name__ == "__main__":
+    import sys
+    slug = sys.argv[1] if len(sys.argv) > 1 else None
+    if slug:
+        _print(devices.BY_SLUG[slug])
+    else:
+        for d in devices.DEVICES:
+            _print(d)

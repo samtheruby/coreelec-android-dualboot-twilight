@@ -102,18 +102,19 @@ def main():
     tgt = mi["a_byte"] if ce_slot == "_a" else mi["b_byte"]
     chk(tgt == 0 and mi["crc_ok"], f"CE slot {ce_slot} priority -> 0, crc recomputed")
 
-    print("\n== GPT artifact vs device geometry ==")
-    gp = open(os.path.join(ART, "gpt_primary.bin"), "rb").read()
+    print(f"\n== GPT artifact vs device geometry ({dev.slug}) ==")
+    art_dev = os.path.join(ART, dev.slug)          # artifacts/<slug>/
+    gp = open(os.path.join(art_dev, "gpt_primary.bin"), "rb").read()
     num = struct.unpack_from("<I", gp, 512 + 80)[0]
     chk(num == 128, "artifact GPT has 128 entries")
-    secs = {n: (a, b, c) for n, a, b, c in L.as_sectors()}
-    chk(secs["CE_STORAGE"][1] == L.TOTAL_SECTORS - 34 + 1 - 0 or secs["CE_STORAGE"][1] == 15265791,
-        f"CE_STORAGE ends at last usable LBA ({secs['CE_STORAGE'][1]})")
+    secs = {n: (a, b, c) for n, a, b, c in L.as_sectors(dev)}
+    chk(secs["CE_STORAGE"][1] == dev.stock_ud_last_lba,
+        f"CE_STORAGE ends where stock userdata did ({secs['CE_STORAGE'][1]} == {dev.stock_ud_last_lba})")
 
     print("\n== artifact sizes vs layout ==")
     for name, art in (("CE_FLASH", "ce_flash.img"), ("CE_STORAGE", "ce_storage.img")):
         want = secs[name][2] * 512
-        raw = os.path.join(ART, art)
+        raw = os.path.join(art_dev, art)
         if os.path.exists(raw):
             got = os.path.getsize(raw)
             chk(got <= want, f"{art} ({got} B) fits partition {name} ({want} B)")
@@ -121,7 +122,7 @@ def main():
             chk(True, f"{art}.gz present (raw size verified at build; fits {name})")
         else:
             chk(False, f"{art}[.gz] missing")
-    chk(os.path.getsize(os.path.join(ART, "dtboa.img")) == 0x20000, "dtboa.img == 128 KiB")
+    chk(os.path.getsize(os.path.join(art_dev, "dtboa.img")) == 0x20000, "dtboa.img == 128 KiB")
 
     print(f"\n==== {PASS} passed, {FAIL} failed ====")
     sys.exit(1 if FAIL else 0)

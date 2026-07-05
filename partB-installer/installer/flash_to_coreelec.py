@@ -27,20 +27,20 @@ sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 
 DISK = "/dev/block/mmcblk0"
-GPT_BACKUP_LBA = 15_265_792
-STOCK_NUM_ENTRIES = 32
-STOCK_UD_LAST_LBA = 15_265_791
 BIG = {"ce_flash.img", "ce_storage.img"}
 NC = "/vendor/bin/busybox nc"
 GUNZIP = "/vendor/bin/busybox gzip -dc"
+# Geometry (GPT backup LBA, stock entry count, stock userdata last-LBA) and the
+# per-device artifact directory now come from the IDENTIFIED device (self.device /
+# self.artdir), not module constants -- the stick and box differ on all of them.
 
 
 def shq(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def secs():
-    return {n: (a, b, c) for n, a, b, c in L.as_sectors()}
+def secs(dev):
+    return {n: (a, b, c) for n, a, b, c in L.as_sectors(dev)}
 
 
 def main():
@@ -60,8 +60,8 @@ def main():
 
     print(f"=== CoreELEC dual-boot installer (serial={args.serial} "
           f"mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
-    require_artifacts()
-    ce_slot = g.preflight()
+    ce_slot = g.preflight()          # identifies the device -> sets g.device / g.artdir
+    require_artifacts(g.device)
     g.build_target_blobs(ce_slot)
     if dry:
         g.print_plan(ce_slot)
@@ -83,14 +83,20 @@ def main():
     print("    'Reboot to CoreELEC' app (boot_ce=1) -> CoreELEC")
 
 
-def require_artifacts():
+def artdir_for(dev):
+    return os.path.join(ART, dev.slug)
+
+
+def require_artifacts(dev):
+    artdir = artdir_for(dev)
     need = ["gpt_primary.bin", "gpt_backup.bin", "boota.img", "dtboa.img"]
-    missing = [n for n in need if not os.path.exists(os.path.join(ART, n))]
+    missing = [n for n in need if not os.path.exists(os.path.join(artdir, n))]
     for n in BIG:
-        if not (os.path.exists(os.path.join(ART, n)) or os.path.exists(os.path.join(ART, n + ".gz"))):
+        if not (os.path.exists(os.path.join(artdir, n)) or os.path.exists(os.path.join(artdir, n + ".gz"))):
             missing.append(n + "[.gz]")
     if missing:
-        sys.exit(f"missing artifacts: {missing} -- run build/build_all.py first")
+        sys.exit(f"missing artifacts for {dev.slug}: {missing} (looked in artifacts/{dev.slug}/) "
+                 f"-- run: python build/build_all.py --device {dev.slug}")
 
 
 class Ctx:
@@ -100,6 +106,8 @@ class Ctx:
         self.port = port
         self.default = default  # "android" | "coreelec" -- which OS a normal reboot boots
         self.pipefail = False   # set in preflight if the device shell supports it
+        self.device = None      # set in preflight (devices.identify)
+        self.artdir = None      # artifacts/<device.slug>/ -- set in preflight
 
     # ---- adb (reads / commands; NOT writes) --------------------------------
     def adb(self, *a, **k):
@@ -191,7 +199,7 @@ class Ctx:
 
     def _img_payload(self, basename):
         """Return (path, is_gz) preferring the gz form for big images."""
-        raw = os.path.join(ART, basename)
+        raw = os.path.join(self.artdir, basename)
         gz = raw + ".gz"
         if basename in BIG and os.path.exists(gz):
             return gz, True
@@ -219,7 +227,7 @@ class Ctx:
         userdata carve, so /data staging can't overlap the region being overwritten
         (no brick race), and push+dd lands where tiny nc transfers intermittently
         raced (the 17 KB GPT + 512 B misc were seen not persisting via nc)."""
-        path = os.path.join(ART, basename)
+        path = os.path.join(self.artdir, basename)
         label = label or basename
         tmp = f"/data/local/tmp/_w_{basename}"
         r = self.adb("push", path, tmp, capture_output=True)
@@ -253,6 +261,7 @@ class Ctx:
             self.getprop,
             devices.sectors_reader(lambda cmd: self.su(cmd)[0]),
             require_layout=True, log=print)
+        self.artdir = artdir_for(self.device)
         if "uid=0" not in self.su("id")[0]:
             sys.exit("su root not available")
         vbs = self.getprop("ro.boot.verifiedbootstate")
@@ -277,8 +286,8 @@ class Ctx:
         if len(gpt) < 34 * 512 or gpt[512:520] != b"EFI PART":
             sys.exit("could not read GPT header")
         num = struct.unpack_from("<I", gpt, 512 + 80)[0]
-        if num != STOCK_NUM_ENTRIES:
-            sys.exit(f"GPT entries={num} != stock {STOCK_NUM_ENTRIES}. Abort.")
+        if num != self.device.stock_num_entries:
+            sys.exit(f"GPT entries={num} != stock {self.device.stock_num_entries}. Abort.")
         pe = struct.unpack_from("<Q", gpt, 512 + 72)[0]
         arr = gpt[pe * 512:]
         ud_last = None
@@ -288,8 +297,8 @@ class Ctx:
                 break
             if e[56:128].decode("utf-16-le", "replace").split("\x00")[0] == "userdata":
                 ud_last = struct.unpack_from("<Q", e, 40)[0]
-        if ud_last != STOCK_UD_LAST_LBA:
-            sys.exit(f"userdata last_lba={ud_last} != stock {STOCK_UD_LAST_LBA}. Abort.")
+        if ud_last != self.device.stock_ud_last_lba:
+            sys.exit(f"userdata last_lba={ud_last} != stock {self.device.stock_ud_last_lba}. Abort.")
         print(f"  GPT stock: 32 entries, userdata ends {ud_last} (full size)")
 
         active = self.getprop("ro.boot.slot_suffix")
@@ -310,7 +319,7 @@ class Ctx:
         new_env = build_env.build_target_env(env_raw[:envtool.ENV_SIZE], ce_slot, self.default)
         kept = [k for k in build_env.IDENTITY_KEYS if k in envtool.parse(new_env)]
         print(f"  env: +{len(build_env.GENERIC_KEYS)} generic +gate({ce_slot}) default={self.default}; identity kept: {kept}")
-        open(os.path.join(ART, "env_target.bin"), "wb").write(new_env)
+        open(os.path.join(self.artdir, "env_target.bin"), "wb").write(new_env)
 
         # The A/B control block sits at misc offset 0x800 == sector 4. Read that
         # whole 512-byte sector and patch only its first 32 bytes, then write the
@@ -321,16 +330,16 @@ class Ctx:
         info = ab_misc.parse(bytes(sector[:32]))
         print(f"  misc A/B: a=0x{info['a_byte']:02x} b=0x{info['b_byte']:02x} crc_ok={info['crc_ok']}")
         sector[:32] = ab_misc.mark_unbootable(bytes(sector[:32]), ce_slot)
-        open(os.path.join(ART, "misc_sector.bin"), "wb").write(bytes(sector))
+        open(os.path.join(self.artdir, "misc_sector.bin"), "wb").write(bytes(sector))
         print(f"  misc_sector.bin (512 B): {ce_slot} -> unbootable")
 
     # ---- plan (dry-run) ----------------------------------------------------
     def print_plan(self, ce_slot):
-        s = secs()
-        print("\n-- write plan (streamed via nc; no writes in dry-run) --")
+        s = secs(self.device)
+        print(f"\n-- write plan for [{self.device.slug}] (streamed via nc; no writes in dry-run) --")
         for lbl, src, dst in [
             ("GPT-primary", "gpt_primary.bin", f"{DISK} seek=0"),
-            ("GPT-backup", "gpt_backup.bin", f"{DISK} seek={GPT_BACKUP_LBA}"),
+            ("GPT-backup", "gpt_backup.bin", f"{DISK} seek={self.device.gpt_backup_lba}"),
             ("CE_FLASH", "ce_flash.img[.gz]", f"{DISK} seek={s['CE_FLASH'][0]}"),
             ("CE_STORAGE", "ce_storage.img[.gz]", f"{DISK} seek={s['CE_STORAGE'][0]}"),
             ("userdata-sb wipe", "/dev/zero x8192", f"{DISK} seek={s['userdata'][0]}"),
@@ -357,10 +366,11 @@ class Ctx:
             print(f"  {name} ({len(raw)} B)")
 
         pull("gpt_primary_pre.bin", f"dd if={DISK} bs=512 count=34")
-        # full 2 MiB backup-GPT region (array + alt header at the last sector) -- this is
-        # exactly the span the install overwrites, so restore_stock_gpt.py can reverse it
-        # cleanly from pulled_backups/ (a 34-sector grab would miss the alt header).
-        pull("gpt_backup_pre.bin", f"dd if={DISK} bs=512 skip={GPT_BACKUP_LBA} count=4096")
+        # the whole backup-GPT region (array + alt header at the last sector) -- exactly
+        # the span the install overwrites, so restore_stock_gpt.py can reverse it cleanly
+        # from pulled_backups/. Span is device-specific: stick 4096 (2 MiB), box 33 sectors.
+        pull("gpt_backup_pre.bin",
+             f"dd if={DISK} bs=512 skip={self.device.gpt_backup_lba} count={self.device.gpt_backup_span}")
         pull("env_pre.bin", "dd if=/dev/block/by-name/env bs=512 count=128")
         pull("misc_pre.bin", "dd if=/dev/block/by-name/misc bs=512 count=64")
         pull(f"boot{ce_slot}_pre.bin", f"dd if=/dev/block/by-name/boot{ce_slot}")
@@ -385,13 +395,13 @@ class Ctx:
             sys.exit("re-guard failed (device or state changed) -- aborting before writes")
 
     def write_all(self, ce_slot, skip_gpt=False, skip_sbwipe=False):
-        s = secs()
+        s = secs(self.device)
         print("\n-- writes (GPT/kernel/dtb/env: push+dd; CE images: nc; misc: b64) --")
         # GPT first (push+dd, reliable): commits new geometry so a later failure
         # still lets Android reformat the shrunk userdata and boot.
         if not skip_gpt:
             self.push_dd("gpt_primary.bin", DISK, 0, "GPT-primary")
-            self.push_dd("gpt_backup.bin", DISK, GPT_BACKUP_LBA, "GPT-backup")
+            self.push_dd("gpt_backup.bin", DISK, self.device.gpt_backup_lba, "GPT-backup")
         self._verify_gpt()
         # All /data-staged (push+dd) + small writes go NOW, while userdata is still
         # healthy. The CE writes further down land in the carve by raw offset and can
@@ -401,7 +411,7 @@ class Ctx:
         self.push_dd("dtboa.img", f"/dev/block/by-name/dtbo{ce_slot}", 0, f"dtbo{ce_slot}")
         # A/B misc: aligned 512-byte sector @ sector 4 (offset 0x800), on-device b64
         # (a seek'd nc->dd write to the small misc partition did not persist).
-        self.write_sector_b64(os.path.join(ART, "misc_sector.bin"),
+        self.write_sector_b64(os.path.join(self.artdir, "misc_sector.bin"),
                               "/dev/block/by-name/misc", 4)
         self._verify_misc(ce_slot)
         # env (push+dd; a bad env just falls back to default -> Android still boots)
@@ -512,7 +522,7 @@ class Ctx:
     def _sha_image_raw(self, basename):
         """sha256 + length of the RAW image, decompressing the .gz on the fly
         if only the gz form is shipped (so it matches what landed on disk)."""
-        raw = os.path.join(ART, basename); gz = raw + ".gz"
+        raw = os.path.join(self.artdir, basename); gz = raw + ".gz"
         if os.path.exists(raw):
             return self._sha_file(raw)
         if not os.path.exists(gz):
@@ -536,17 +546,18 @@ class Ctx:
         """SHA-256 every written region off the eMMC vs the PC-side source."""
         print("\n-- SHA-256 read-back verification (off eMMC) --")
         self._drop_caches()
-        s = secs()
+        s = secs(self.device)
+        A = self.artdir
         # (label, local-hash fn, device dd source, skip in 512-sectors)
         plan = [
-            ("GPT-primary", self._sha_file(os.path.join(ART, "gpt_primary.bin")), DISK, 0),
-            ("GPT-backup",  self._sha_file(os.path.join(ART, "gpt_backup.bin")),  DISK, GPT_BACKUP_LBA),
-            ("CE_FLASH",    self._sha_image_raw("ce_flash.img"),                  DISK, s["CE_FLASH"][0]),
-            ("CE_STORAGE",  self._sha_image_raw("ce_storage.img"),                DISK, s["CE_STORAGE"][0]),
-            ("kernel",      self._sha_file(os.path.join(ART, "boota.img")),       f"/dev/block/by-name/boot{ce_slot}", 0),
-            ("dtb",         self._sha_file(os.path.join(ART, "dtboa.img")),       f"/dev/block/by-name/dtbo{ce_slot}", 0),
-            ("env",         self._sha_file(os.path.join(ART, "env_target.bin")),  "/dev/block/by-name/env", 0),
-            ("A/B misc",    self._sha_file(os.path.join(ART, "misc_sector.bin")), "/dev/block/by-name/misc", 4),  # sector 4 == 0x800
+            ("GPT-primary", self._sha_file(os.path.join(A, "gpt_primary.bin")), DISK, 0),
+            ("GPT-backup",  self._sha_file(os.path.join(A, "gpt_backup.bin")),  DISK, self.device.gpt_backup_lba),
+            ("CE_FLASH",    self._sha_image_raw("ce_flash.img"),                DISK, s["CE_FLASH"][0]),
+            ("CE_STORAGE",  self._sha_image_raw("ce_storage.img"),              DISK, s["CE_STORAGE"][0]),
+            ("kernel",      self._sha_file(os.path.join(A, "boota.img")),       f"/dev/block/by-name/boot{ce_slot}", 0),
+            ("dtb",         self._sha_file(os.path.join(A, "dtboa.img")),       f"/dev/block/by-name/dtbo{ce_slot}", 0),
+            ("env",         self._sha_file(os.path.join(A, "env_target.bin")),  "/dev/block/by-name/env", 0),
+            ("A/B misc",    self._sha_file(os.path.join(A, "misc_sector.bin")), "/dev/block/by-name/misc", 4),  # sector 4 == 0x800
         ]
         allok = True
         for label, (lh, n), dd_if, skip in plan:
@@ -597,7 +608,7 @@ class Ctx:
         sec[64:832] = bytearray(768)                      # clear recovery[768]
         rec = b"recovery\n--wipe_data\n"
         sec[64:64 + len(rec)] = rec
-        path = os.path.join(ART, "_bcb_wipe.bin")
+        path = os.path.join(self.artdir, "_bcb_wipe.bin")
         open(path, "wb").write(bytes(sec))
         self.write_sector_b64(path, "/dev/block/by-name/misc", 0)
         chk = self.su_bytes("dd if=/dev/block/by-name/misc bs=512 count=1 2>/dev/null")[:13]

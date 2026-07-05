@@ -21,15 +21,27 @@
 # Generated artifacts — most rebuilt by build/build_all.py from a CoreELEC img.
 # Small prebuilt artifacts are committed so the installer bundle is usable from
 # source without a full build. Large CE images (ce_flash, boota) are release-only.
+# Per-device flashables live in artifacts/<slug>/; device-generic ones stay flat.
 # Use /* (not /) so that file-level re-inclusions below are honoured by git.
 partB-installer/artifacts/*
-!partB-installer/artifacts/gpt_primary.bin
-!partB-installer/artifacts/gpt_backup.bin
-!partB-installer/artifacts/dtboa.img
-!partB-installer/artifacts/ce_storage.img.gz
+# device-generic (flat)
 !partB-installer/artifacts/env_additions.json
 !partB-installer/artifacts/RebootToCoreELEC.apk
 !partB-installer/artifacts/script.coreelec.toolbox-*.zip
+# per-device dirs: commit the SMALL flashables (gpt/dtboa/ce_storage.gz),
+# keep the LARGE ones (boota.img, ce_flash.img.gz) release-only.
+!partB-installer/artifacts/stick/
+!partB-installer/artifacts/box/
+partB-installer/artifacts/stick/*
+partB-installer/artifacts/box/*
+!partB-installer/artifacts/stick/gpt_primary.bin
+!partB-installer/artifacts/stick/gpt_backup.bin
+!partB-installer/artifacts/stick/dtboa.img
+!partB-installer/artifacts/stick/ce_storage.img.gz
+!partB-installer/artifacts/box/gpt_primary.bin
+!partB-installer/artifacts/box/gpt_backup.bin
+!partB-installer/artifacts/box/dtboa.img
+!partB-installer/artifacts/box/ce_storage.img.gz
 partB-installer/dist/
 partB-installer/*.zip
 

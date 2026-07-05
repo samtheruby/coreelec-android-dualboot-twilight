@@ -29,11 +29,9 @@ PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage0 
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 DEST = os.path.join(HERE, "..", "pulled_backups_prerestore")
 DISK = "/dev/block/mmcblk0"
-TOTAL_SECTORS = 15_269_888
-GPT_BACKUP_LBA = 15_265_792
-STOCK_UD_FIRST_LBA = 6_713_344          # stock userdata start (== carve start)
-STOCK_UD_LAST_LBA = 15_265_791
 SB_WIPE_SECTORS = 8192                  # 4 MiB: clobber fs superblock(s) -> force reformat
+# Geometry (total sectors, GPT backup LBA, stock userdata first/last LBA, backup span)
+# is per-device -- read from the identified device (dev.*) in main().
 
 # Prefer THIS unit's pre-install GPT (stage0) over the dev reference dumps.
 if os.path.exists(os.path.join(PB, "gpt_primary_pre.bin")) and \
@@ -104,7 +102,7 @@ def hdr_crc_ok(buf, off):
     return (zlib.crc32(h) & 0xffffffff) == stored
 
 
-def verify_stock_files():
+def verify_stock_files(dev):
     for p in (PRIMARY, BACKUP):
         if not os.path.exists(p):
             sys.exit(f"missing stock backup: {p}")
@@ -113,17 +111,20 @@ def verify_stock_files():
     # primary: a 34-sector GPT grab (pulled_backups) or a 2 MiB disk dump (device_backups)
     if len(f) not in (34 * 512, 2 * 1024 * 1024):
         sys.exit(f"primary source is {len(f)} B (want 17408 or 2 MiB) -- refusing")
-    # backup: the full 2 MiB region (entry array + alt header at the last sector)
-    if len(b) != 2 * 1024 * 1024:
-        sys.exit(f"backup source is {len(b)} B (want 2 MiB) -- refusing")
+    # backup: this device's backup-GPT region (entry array + alt header at the last
+    # sector). Span is per-device: stick 2 MiB grab, box 33 sectors (see gpt_backup_span).
+    ok_backup_sizes = (dev.gpt_backup_span * 512, 2 * 1024 * 1024)
+    if len(b) not in ok_backup_sizes:
+        sys.exit(f"backup source is {len(b)} B (want {dev.gpt_backup_span * 512} or 2 MiB "
+                 f"for {dev.slug}) -- refusing")
     num, parts = parse_gpt(f)
     if num != 32:
         sys.exit(f"stock primary has {num} entries (expected 32) -- refusing")
     if not hdr_crc_ok(f, 512):
         sys.exit("stock primary header CRC bad -- refusing")
     ud = next((ll for nm, fl, ll in parts if nm == "userdata"), None)
-    if ud != STOCK_UD_LAST_LBA:
-        sys.exit(f"stock userdata last_lba={ud} != {STOCK_UD_LAST_LBA} -- refusing")
+    if ud != dev.stock_ud_last_lba:
+        sys.exit(f"stock userdata last_lba={ud} != {dev.stock_ud_last_lba} ({dev.slug}) -- refusing")
     if b.rfind(b"EFI PART") < 0:
         sys.exit("stock backup has no EFI PART header -- refusing")
     print(f"  stock source [{SRC_TAG}] OK: primary {len(f)} B (32 entries, userdata->{ud}), "
@@ -146,19 +147,17 @@ def main():
     print(f"=== restore stock GPT (serial={a.serial} "
           f"mode={'WRITE' if a.yes else 'RECON'}) ===")
 
-    # ---- stock source ----
-    print("\n-- stock backup source --")
-    verify_stock_files()
-
-    # ---- device identity + size guard ----
-    # Identify by model + eMMC size (the constants below are the STICK's geometry;
-    # require_layout=True refuses the box until its layout/backups exist).
+    # ---- device identity + size guard (identify first: geometry is per-device) ----
     print("\n-- device --")
-    devices.identify(d.getprop,
-                     devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
-                     require_layout=True, log=print)
+    dev = devices.identify(d.getprop,
+                           devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
+                           require_layout=True, log=print)
     if "uid=0" not in d.su("id")[0]:
         sys.exit("su root not available")
+
+    # ---- stock source (validated against this device's geometry) ----
+    print("\n-- stock backup source --")
+    verify_stock_files(dev)
 
     # ---- read current GPT ----
     print("\n-- current on-device GPT --")
@@ -173,7 +172,7 @@ def main():
         if nm in ("userdata", "CE_FLASH", "CE_STORAGE"):
             print(f"    {nm:<12} {fl:>10}..{ll:<10}  ({(ll - fl + 1) // 2048} MiB)")
 
-    is_stock = (num == 32 and not ce and ud == STOCK_UD_LAST_LBA)
+    is_stock = (num == 32 and not ce and ud == dev.stock_ud_last_lba)
     if is_stock:
         print("\nAlready stock -- nothing to restore. (Run flash_to_coreelec.py directly.)")
         return
@@ -182,7 +181,7 @@ def main():
     print("\n-- pre-restore backup -> pulled_backups_prerestore/ --")
     os.makedirs(DEST, exist_ok=True)
     open(os.path.join(DEST, "gpt_primary_modified.bin"), "wb").write(cur)
-    bkp = d.pull_raw(f"dd if={DISK} bs=512 skip={GPT_BACKUP_LBA} count=34")
+    bkp = d.pull_raw(f"dd if={DISK} bs=512 skip={dev.gpt_backup_lba} count={dev.gpt_backup_span}")
     open(os.path.join(DEST, "gpt_backup_modified.bin"), "wb").write(bkp)
     print(f"  saved gpt_primary_modified.bin ({len(cur)} B), "
           f"gpt_backup_modified.bin ({len(bkp)} B)")
@@ -192,8 +191,8 @@ def main():
         print(f"   push {os.path.basename(PRIMARY)} -> /data/local/tmp ; "
               f"dd of={DISK} bs=512 count=34 seek=0 conv=fsync     (primary GPT)")
         print(f"   push {os.path.basename(BACKUP)}  -> /data/local/tmp ; "
-              f"dd of={DISK} bs=512 seek={GPT_BACKUP_LBA} conv=fsync   (backup GPT, 2 MiB)")
-        print(f"   dd if=/dev/zero of={DISK} bs=512 seek={STOCK_UD_FIRST_LBA} "
+              f"dd of={DISK} bs=512 seek={dev.gpt_backup_lba} conv=fsync   (backup GPT)")
+        print(f"   dd if=/dev/zero of={DISK} bs=512 seek={dev.stock_ud_first_lba} "
               f"count={SB_WIPE_SECTORS} conv=fsync   (wipe userdata superblock -> clean reformat)")
         print("   then: sync ; adb reboot")
         print("\nRECON only. Re-run with --yes to write.")
@@ -206,11 +205,11 @@ def main():
     print("  pushed stock dumps to /data/local/tmp")
 
     wipe = "" if a.no_sbwipe else (
-        f"dd if=/dev/zero of={DISK} bs=512 seek={STOCK_UD_FIRST_LBA} count={SB_WIPE_SECTORS} conv=fsync && ")
+        f"dd if=/dev/zero of={DISK} bs=512 seek={dev.stock_ud_first_lba} count={SB_WIPE_SECTORS} conv=fsync && ")
     print("  userdata SB wipe: " + ("SKIPPED (--no-sbwipe)" if a.no_sbwipe else "yes (forces reformat)"))
     out, rc = d.su(
         f"dd if=/data/local/tmp/_restore_gpt_p.bin of={DISK} bs=512 count=34 seek=0 conv=fsync && "
-        f"dd if=/data/local/tmp/_restore_gpt_b.bin of={DISK} bs=512 seek={GPT_BACKUP_LBA} conv=fsync && "
+        f"dd if=/data/local/tmp/_restore_gpt_b.bin of={DISK} bs=512 seek={dev.gpt_backup_lba} conv=fsync && "
         f"{wipe}"
         f"sync && "
         f"rm -f /data/local/tmp/_restore_gpt_p.bin /data/local/tmp/_restore_gpt_b.bin && echo WROTE")
@@ -225,7 +224,7 @@ def main():
     ud2 = next((ll for nm, _, ll in p2 if nm == "userdata"), None)
     print(f"\n-- verify (raw re-read of mmcblk0) --")
     print(f"  entries={n2}  CE partitions={ce2 or 'none'}  userdata last_lba={ud2}")
-    if not (n2 == 32 and not ce2 and ud2 == STOCK_UD_LAST_LBA):
+    if not (n2 == 32 and not ce2 and ud2 == dev.stock_ud_last_lba):
         sys.exit("verify FAILED -- on-disk GPT is not stock. DO NOT REBOOT; investigate.")
     print("  on-disk GPT is stock. Now reboot so the kernel re-reads it:")
     print(f"    adb -s {a.serial} reboot")

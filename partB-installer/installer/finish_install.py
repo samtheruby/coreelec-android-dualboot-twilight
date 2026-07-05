@@ -33,11 +33,13 @@ def main():
     g = F.Ctx(a.serial, dry, a.port)
 
     print(f"=== finish install (serial={a.serial} mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
-    F.require_artifacts()
     # Identify by model + eMMC size; geometry-dependent completion -> require_layout=True.
     dev = devices.identify(g.getprop,
                            devices.sectors_reader(lambda cmd: g.su(cmd)[0]),
                            require_layout=True, log=print)
+    g.device = dev
+    g.artdir = F.artdir_for(dev)
+    F.require_artifacts(dev)
     if "uid=0" not in g.su("id")[0]:
         sys.exit("su root not available")
     g.pipefail = g.su("set -o pipefail 2>/dev/null && echo Y")[0].strip() == "Y"

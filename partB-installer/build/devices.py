@@ -42,10 +42,19 @@ can be imported anywhere), so keep them in sync.
 
 import sys
 
+SECTOR = 512
+MIB = 1024 * 1024
+SEC_PER_MIB = MIB // SECTOR              # 2048
+
 
 class Device:
     def __init__(self, slug, model, codename, total_sectors,
-                 magisk_img, layout_ready, name, notes=""):
+                 magisk_img, layout_ready, name, notes="",
+                 carve_start_mib=None, carve_end_mib=None,
+                 sizes_mib=None, order=None,
+                 gpt_backup_lba=None, stock_ud_last_lba=None,
+                 stock_num_entries=32):
+        # ---- identity (discrimination) ----
         self.slug = slug                    # short internal id: "stick" | "box"
         self.model = model                  # ro.product.model, the primary key
         self.codename = codename            # ro.product.device (shared: "twilight")
@@ -54,6 +63,55 @@ class Device:
         self.layout_ready = layout_ready    # False -> refuse geometry-dependent steps
         self.name = name                    # human label for logs
         self.notes = notes
+        # ---- partition geometry (single source; consumed by layout.py, the GPT
+        #      builder, and the installer) ----
+        self.carve_start_mib = carve_start_mib   # start of the carve region (== stock userdata start)
+        self.carve_end_mib = carve_end_mib       # end of the carve region
+        self.sizes_mib = sizes_mib or {}         # {userdata, CE_FLASH, CE_STORAGE} -> MiB
+        self.order = order or []                 # layout order low->high MiB
+        # GPT backup location: BOTH the dd-seek target for gpt_backup.bin AND the
+        # LBA where the stock backup blob begins (build_gpt_layout BACK_START_LBA).
+        # On the stick these coincide with total-4096; on the box they do NOT
+        # (userdata ends ~2 MiB below last_usable), so store it explicitly.
+        self.gpt_backup_lba = gpt_backup_lba
+        self.stock_ud_last_lba = stock_ud_last_lba   # preflight: stock userdata last_lba
+        self.stock_num_entries = stock_num_entries   # stock GPT entry count (32)
+
+    # ---- derived geometry ---------------------------------------------------
+    @property
+    def carve_total_mib(self):
+        return self.carve_end_mib - self.carve_start_mib
+
+    @property
+    def stock_ud_first_lba(self):
+        return self.carve_start_mib * SEC_PER_MIB
+
+    @property
+    def gpt_backup_span(self):
+        """Sectors from gpt_backup_lba to end of disk == size of the backup-GPT blob
+        (dd count for the backup grab). Stick: 4096 (2 MiB). Box: 33 (array+alt hdr)."""
+        return self.total_sectors - self.gpt_backup_lba
+
+    def partitions(self):
+        """Yield (name, start_mib, end_mib, size_mib) in layout order."""
+        cur = self.carve_start_mib
+        out = []
+        for name in self.order:
+            size = self.sizes_mib[name]
+            out.append((name, cur, cur + size, size))
+            cur += size
+        assert cur == self.carve_end_mib, \
+            f"{self.slug} layout sums to {cur} MiB, expected {self.carve_end_mib}"
+        return out
+
+    def as_sectors(self):
+        """Same as partitions() but (name, start_lba, end_lba_inclusive, count)."""
+        out = []
+        for name, s_mib, e_mib, _ in self.partitions():
+            start = s_mib * SEC_PER_MIB
+            end = e_mib * SEC_PER_MIB - 1        # GPT last_lba is inclusive
+            out.append((name, start, end, end - start + 1))
+        return out
 
     def __repr__(self):
         return f"<Device {self.slug} model={self.model} sectors={self.total_sectors}>"
@@ -66,10 +124,16 @@ STICK = Device(
     slug="stick",
     model="MiTV-AFMU1",
     codename="twilight",
-    total_sectors=15_269_888,               # == build/layout.py TOTAL_SECTORS
+    total_sectors=15_269_888,               # 7.28 GiB
     magisk_img="twilight-init_boot-patched.img",
     layout_ready=True,
     name="Xiaomi TV Stick 4K 2nd Gen",
+    carve_start_mib=3278,                    # == stock userdata start (sector 6,713,344)
+    carve_end_mib=7454,                      # sector 15,265,792 (== last_usable+1)
+    sizes_mib={"userdata": 2376, "CE_FLASH": 600, "CE_STORAGE": 1200},
+    order=["userdata", "CE_FLASH", "CE_STORAGE"],
+    gpt_backup_lba=15_265_792,               # total-4096: start of the stick's 2 MiB backup-GPT grab
+    stock_ud_last_lba=15_265_791,
 )
 
 BOX = Device(
@@ -78,9 +142,17 @@ BOX = Device(
     codename="twilight",
     total_sectors=61_071_360,               # 29.12 GiB (from recon)
     magisk_img="xiaomi_tv_box_s_3rd_gen_init_boot.img",
-    layout_ready=False,                      # carve split undecided -> no geometry steps yet
+    layout_ready=True,                       # geometry implemented + artifacts/box/ built
     name="Xiaomi TV Box S 3rd Gen",
-    notes="Geometry/carve layout pending the carve-size decision. See PORT-TVBOX-S-3RDGEN.md.",
+    notes="",
+    carve_start_mib=3278,                    # same stock userdata start (sector 6,713,344)
+    carve_end_mib=29818,                     # 3278 + 26540 (carve = stock userdata span)
+    sizes_mib={"userdata": 14800, "CE_FLASH": 1500, "CE_STORAGE": 10240},
+    order=["userdata", "CE_FLASH", "CE_STORAGE"],
+    # NOTE: unlike the stick, backup GPT is NOT at total-4096. Box stock userdata ends
+    # ~2 MiB below last_usable, so the backup array+alt-header sit at last_usable+1.
+    gpt_backup_lba=61_071_327,               # last_usable(61,071,326)+1; 33-sector backup blob
+    stock_ud_last_lba=61_067_263,            # ud start 6,713,344 + size 54,353,920 - 1
 )
 
 DEVICES = [STICK, BOX]
@@ -160,13 +232,20 @@ def sectors_reader(su_text):
 
 
 if __name__ == "__main__":
-    # Print the registry (sanity/inspection).
+    # Print the registry + validate every device's geometry (sanity/inspection).
     for d in DEVICES:
         ready = "layout READY" if d.layout_ready else "layout pending"
-        print(f"{d.slug:<6} {d.model:<12} {d.codename:<10} "
+        print(f"\n{d.slug:<6} {d.model:<12} {d.codename:<10} "
               f"{d.total_sectors:>12,} sec  {ready}  magisk={d.magisk_img}")
+        got = sum(d.sizes_mib.values())
+        assert got == d.carve_total_mib, \
+            f"{d.slug}: sizes sum {got} != carve {d.carve_total_mib}"
+        print(f"       carve {d.carve_start_mib}..{d.carve_end_mib} MiB "
+              f"({d.carve_total_mib} MiB)  gpt_backup_lba={d.gpt_backup_lba:,}")
+        for name, s, e, c in d.as_sectors():
+            print(f"       {name:<12} LBA {s:>10}..{e:<10} ({c // SEC_PER_MIB} MiB)")
     # Guard against duplicate keys.
     assert len(BY_MODEL) == len(DEVICES), "duplicate model in registry"
     assert len(BY_SLUG) == len(DEVICES), "duplicate slug in registry"
-    print("registry OK")
+    print("\nregistry OK (geometry validated)")
     sys.exit(0)
