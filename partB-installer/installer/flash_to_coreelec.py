@@ -175,6 +175,14 @@ class Ctx:
                        if proc.poll() is not None else "(listener up, no connect)")
                 proc.kill()
                 sys.exit(f"{label}: could not connect to nc tunnel on port {port} {err}")
+            # create_connection(timeout=5) leaves a 5 s timeout on the socket, which
+            # then governs every sendall below -- NOT just the connect. On a large carve
+            # the device-side `gzip -dc | dd` backpressures the pipe far longer than 5 s
+            # (an empty ext4 gz expands to a huge zero-run that dd writes at eMMC speed),
+            # so a mid-stream sendall blocks past 5 s and raises a spurious TimeoutError.
+            # This bit the box's 10 GiB CE_STORAGE but not the stick's 1.2 GiB. Clear it:
+            # the transfer's real bound is proc.wait(verify_timeout) after SHUT_WR.
+            sock.settimeout(None)
             sent = 0
             with open(payload_path, "rb") as f:
                 while True:
