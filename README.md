@@ -8,7 +8,7 @@ Xiaomi 4k 2nd Gen or a Xiaomi TV Box S 3rd Gen.
 ## ⚠️ Read first
 - **READ THE ENTIRE README BEFORE ATTEMPTING**
 - **THERE IS NO WARRANTY AND I AM NOT RESPONSIBLE FOR ANY DAMAGE DONE TO YOUR DEVICE**
-- **Multiple Stages are destructive to Android user data. Your apps/logins on the stick are erased and the stick will need to be setup from scratch**
+- **Multiple Stages are destructive to Android user data. Your apps/logins on the device are erased and the device will need to be setup from scratch**
 - **This is unsupported by CoreELEC.** Do not file CoreELEC bug reports for a device set up this way. If you have bugs open a report here!
 
 ---
