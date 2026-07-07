@@ -250,6 +250,24 @@ class Ctx:
         devcmd = f"{GUNZIP} | {sink}" if gz else sink
         self.nc_write(path, devcmd, name)
 
+    def _write_retry(self, attempt_fn, label, attempts=3, pause=1.0):
+        """Run attempt_fn() -- a single idempotent-overwrite write -- up to `attempts`
+        times, retrying a transient adb/dd failure. attempt_fn returns (ok, detail);
+        on ok it returns immediately, on the final failure it sys.exits. Safe for every
+        caller because each re-seeks/overwrites the SAME region from scratch, so a retry
+        is a full rewrite, never a partial append. Unlike nc_write (which can tell a
+        stall from a device fault) these USB push+dd / b64 writes have no reliable
+        transient-vs-deterministic signal, so ANY failure retries; a deterministic
+        fault simply exhausts the attempts and exits (a few seconds, not a loop)."""
+        for attempt in range(1, attempts + 1):
+            ok, detail = attempt_fn()
+            if ok:
+                return
+            if attempt == attempts:
+                sys.exit(f"{label}: {detail} (gave up after {attempts} attempts)")
+            print(f"  {label}: {detail} -- retrying ({attempt + 1}/{attempts})")
+            time.sleep(pause)
+
     def push_dd(self, basename, dest, seek=0, label=None):
         """Reliable write of a small, NON-carve artifact (GPT, kernel, dtb, env):
         adb push to /data/local/tmp then on-device dd. These targets are OUTSIDE the
@@ -259,12 +277,18 @@ class Ctx:
         path = os.path.join(self.artdir, basename)
         label = label or basename
         tmp = f"/data/local/tmp/_w_{basename}"
-        r = self.adb("push", path, tmp, capture_output=True)
-        if r.returncode != 0:
-            sys.exit(f"{label}: push failed: {r.stderr.decode('utf-8', 'replace')}")
-        out, rc = self.su(f"dd if={tmp} of={dest} bs=512 seek={seek} conv=fsync 2>&1; rm -f {tmp}")
-        if rc != 0:
-            sys.exit(f"{label}: dd failed: {out.strip()}")
+
+        def attempt():
+            r = self.adb("push", path, tmp, capture_output=True)
+            if r.returncode != 0:
+                return False, f"push failed: {r.stderr.decode('utf-8', 'replace').strip()}"
+            # rm runs even on dd failure (`;`-joined), so a retry re-pushes clean.
+            out, rc = self.su(f"dd if={tmp} of={dest} bs=512 seek={seek} conv=fsync 2>&1; rm -f {tmp}")
+            if rc != 0:
+                return False, f"dd failed: {out.strip()}"
+            return True, None
+
+        self._write_retry(attempt, label)
         print(f"  WROTE {label} -> {dest} seek={seek}  (push+dd, {os.path.getsize(path):,} B)")
 
     def write_sector_b64(self, payload_path, devnode, seek_blocks, bs=512):
@@ -274,11 +298,17 @@ class Ctx:
         `base64 -d | dd` does. Only for small blobs (the b64 rides the command line)."""
         data = open(payload_path, "rb").read()
         b64 = base64.b64encode(data).decode()
-        out, rc = self.su(f"printf %s {b64} | base64 -d | "
-                          f"dd of={devnode} bs={bs} seek={seek_blocks} conv=fsync 2>/dev/null && echo OK")
-        if rc != 0 or "OK" not in out:
-            sys.exit(f"{os.path.basename(payload_path)}: on-device write failed: {out.strip()}")
-        print(f"  WROTE {os.path.basename(payload_path)} -> {devnode} seek={seek_blocks} ({len(data)} B, b64)")
+        name = os.path.basename(payload_path)
+
+        def attempt():
+            out, rc = self.su(f"printf %s {b64} | base64 -d | "
+                              f"dd of={devnode} bs={bs} seek={seek_blocks} conv=fsync 2>/dev/null && echo OK")
+            if rc != 0 or "OK" not in out:
+                return False, f"on-device write failed: {out.strip()}"
+            return True, None
+
+        self._write_retry(attempt, name)
+        print(f"  WROTE {name} -> {devnode} seek={seek_blocks} ({len(data)} B, b64)")
 
     # ---- 1. preflight ------------------------------------------------------
     def preflight(self):
@@ -503,9 +533,13 @@ class Ctx:
             print("  (skip userdata SB wipe -- userdata already sized; preserves env gate)")
         else:
             print(f"  WIPE userdata superblock (4 MiB @ {s['userdata'][0]}s)")
-            if self.su(f"dd if=/dev/zero of={DISK} bs=512 seek={s['userdata'][0]} "
-                       f"count=8192 conv=fsync")[1] != 0:
-                sys.exit("userdata wipe failed")
+
+            def wipe_sb():
+                rc = self.su(f"dd if=/dev/zero of={DISK} bs=512 seek={s['userdata'][0]} "
+                             f"count=8192 conv=fsync")[1]
+                return (rc == 0), (None if rc == 0 else "userdata wipe failed")
+
+            self._write_retry(wipe_sb, "userdata SB wipe")
             self.su("sync")
 
     # ---- verification ------------------------------------------------------
@@ -563,9 +597,11 @@ class Ctx:
         if magic != b"MPT\x00":
             print(f"  MPT: none present (magic={magic!r}) -- kernel already GPT-visible, skip")
             return
-        out, rc = self.su("dd if=/dev/zero of=/dev/block/by-name/reserved bs=512 count=8 conv=fsync 2>&1")
-        if rc != 0:
-            sys.exit(f"MPT wipe failed: {out.strip()}")
+        def attempt():
+            out, rc = self.su("dd if=/dev/zero of=/dev/block/by-name/reserved bs=512 count=8 conv=fsync 2>&1")
+            return (rc == 0), (None if rc == 0 else f"MPT wipe failed: {out.strip()}")
+
+        self._write_retry(attempt, "MPT wipe")
         print("  WIPE Amlogic MPT (reserved[0:0x1000]) -> kernel falls back to GPT (CE_FLASH visible)")
 
     def _verify_mpt(self):
