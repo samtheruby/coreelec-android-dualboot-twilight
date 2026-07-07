@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Complete a PARTIALLY-applied install: GPT + CE_FLASH + CE_STORAGE + kernel + dtb
-are already written, but misc and/or env are not. The normal installer can't be
+Complete a PARTIALLY-applied install: the GPT is already the 128-entry carve but
+one or more regions (misc, env, CE_FLASH, CE_STORAGE, kernel, dtb) did not land --
+e.g. a CE_STORAGE stream that timed out mid-write. The normal installer can't be
 re-run here because its preflight requires a stock 32-entry GPT (which we have
 deliberately replaced). This regenerates the per-unit env/misc blobs from the
-device, writes misc (aligned 512-byte sector) + env, then SHA-256 read-back
-verifies ALL regions and disables OTA.
+device and writes with idempotent=True: EVERY region is hash-gated, so a region
+that already matches the source on eMMC is SKIPPED and only the ones that actually
+failed are re-written. Then a SHA-256 read-back verifies ALL regions and disables OTA.
 
-Safe to re-run (idempotent: it rebuilds blobs from the current device each time;
-env is read fresh, so the gate is re-applied onto whatever env is present).
+Safe to re-run any number of times: it rebuilds blobs from the current device each
+run (env is read fresh, so the gate re-applies onto whatever env is present) and
+the hash-gate makes re-writes a no-op once a region is correct. Note the gate reads
+each region off the eMMC to hash it, so a run that skips the big CE images still
+spends a few minutes hashing 10 GiB+ -- expected, not a hang.
 
   python finish_install.py --serial <serial> --dry-run
   python finish_install.py --serial <serial> --yes
@@ -65,6 +70,7 @@ def main():
     g.build_target_blobs(ce_slot)   # regenerates env_target.bin + misc_sector.bin from device
     if dry:
         print("\n-- would write (GPT already present -> skip_gpt; NO userdata SB wipe) --")
+        print("   each region hash-gated: SKIP if eMMC already matches source, else (re)write")
         print("   kernel+dtb (push+dd) ; misc (b64) ; env/gate (push+dd) ;")
         print("   CE_FLASH/CE_STORAGE (nc) ; then verify_writes (SHA-256 all) + disable OTA")
         print("   userdata is left untouched (already sized) -> the env gate survives.")
@@ -75,7 +81,10 @@ def main():
         # skip_sbwipe: do NOT wipe the userdata SB here. Userdata is already the right
         # size by the time you're "finishing", and a wipe that takes triggers a recovery
         # factory-reset that resets the env -> wipes the gate we just wrote (re-gate loop).
-        g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True)
+        # idempotent: hash-gate every region so a re-run skips what already matches on
+        # eMMC (e.g. a completed CE_FLASH) and only re-streams what actually failed
+        # (e.g. a timed-out CE_STORAGE). Safe to run repeatedly until all regions verify.
+        g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True, idempotent=True)
     finally:
         g.adb("forward", "--remove", f"tcp:{g.port}", capture_output=True)
 

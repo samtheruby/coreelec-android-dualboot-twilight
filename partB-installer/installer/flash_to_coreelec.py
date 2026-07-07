@@ -30,6 +30,14 @@ DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
 NC = "/vendor/bin/busybox nc"
 GUNZIP = "/vendor/bin/busybox gzip -dc"
+
+
+class _NcRetry(Exception):
+    """A transient nc-transfer failure worth retrying (a stalled transfer or a
+    listener that never accepted). A retry re-streams from byte 0 into a fresh
+    port; the sink dd always re-seeks to the region start, so it's a clean full
+    overwrite, never an append. A non-zero device rc (a real decompress/dd error)
+    is NOT this -- it fails immediately rather than looping on a deterministic fault."""
 # Geometry (GPT backup LBA, stock entry count, stock userdata last-LBA) and the
 # per-device artifact directory now come from the IDENTIFIED device (self.device /
 # self.artdir), not module constants -- the stick and box differ on all of them.
@@ -134,9 +142,22 @@ class Ctx:
         self._pseq = getattr(self, "_pseq", -1) + 1
         return self.port + self._pseq
 
-    def nc_write(self, payload_path, devcmd, label, verify_timeout=900):
-        """Stream payload_path from the PC into `nc -l | devcmd` on the device,
-        over its own freshly-forwarded tcp port."""
+    def nc_write(self, payload_path, devcmd, label, verify_timeout=900, attempts=3):
+        """Stream payload_path into `nc -l | devcmd`, retrying a transient failure.
+        Each attempt gets a fresh port and re-streams from byte 0 (a full overwrite,
+        never an append -- the sink dd re-seeks to the region start every time). Only
+        transient failures (stall / no-connect) retry; a device rc != 0 fails hard."""
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._nc_write_once(payload_path, devcmd, label, verify_timeout)
+            except _NcRetry as e:
+                if attempt == attempts:
+                    sys.exit(f"{label}: {e} (gave up after {attempts} attempts)")
+                print(f"  {label}: {e} -- retrying ({attempt + 1}/{attempts})")
+
+    def _nc_write_once(self, payload_path, devcmd, label, verify_timeout=900):
+        """One streamed-write attempt over its own freshly-forwarded tcp port.
+        Raises _NcRetry on a transient failure; sys.exit on a hard (rc != 0) one."""
         port = self._fresh_port()
         self.adb("forward", f"tcp:{port}", f"tcp:{port}", capture_output=True)
         try:
@@ -174,7 +195,7 @@ class Ctx:
                 err = (proc.stderr.read().decode("utf-8", "replace").strip()
                        if proc.poll() is not None else "(listener up, no connect)")
                 proc.kill()
-                sys.exit(f"{label}: could not connect to nc tunnel on port {port} {err}")
+                raise _NcRetry(f"could not connect to nc tunnel on port {port} {err}")
             # create_connection(timeout=5) leaves a 5 s timeout on the socket, which
             # then governs every sendall below -- NOT just the connect. On a large carve
             # the device-side `gzip -dc | dd` backpressures the pipe far longer than 5 s
@@ -197,7 +218,7 @@ class Ctx:
                 rc = proc.wait(timeout=verify_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                sys.exit(f"{label}: device write timed out")
+                raise _NcRetry("device write timed out")
             err = proc.stderr.read().decode("utf-8", "replace").strip()
             if rc != 0:
                 sys.exit(f"{label}: device write failed (rc={rc}) {err}")
@@ -402,28 +423,63 @@ class Ctx:
                 or "CE_FLASH" in byname or "CE_STORAGE" in byname:
             sys.exit("re-guard failed (device or state changed) -- aborting before writes")
 
-    def write_all(self, ce_slot, skip_gpt=False, skip_sbwipe=False):
+    def _already_written(self, src_sha, dd_if, skip):
+        """True iff the on-eMMC region [skip*512 : +n] already hashes to the source
+        blob. Reads off the eMMC (drop_caches first), so it reflects what actually
+        persisted, not a cached page. Used by write_all(idempotent=True) to skip a
+        region a prior (partial) run already wrote correctly."""
+        want, n = src_sha
+        if not want:
+            return False
+        self._drop_caches()
+        return self._sha_device(dd_if, skip, n) == want
+
+    def write_all(self, ce_slot, skip_gpt=False, skip_sbwipe=False, idempotent=False):
         s = secs(self.device)
+        A = self.artdir
         print("\n-- writes (GPT/kernel/dtb/env: push+dd; CE images: nc; misc: b64) --")
+
+        def ensure(label, src_sha_fn, dd_if, skip, write_fn):
+            # idempotent resume (finish_install): if the on-eMMC region already hashes
+            # to the source, a prior run wrote it correctly -- skip the (re)write so a
+            # resume only redoes what actually failed (e.g. rewrite CE_STORAGE, skip the
+            # already-good CE_FLASH). src_sha_fn is a THUNK so a fresh install never pays
+            # the source-hash cost (hashing the 10 GiB CE_STORAGE source is not free).
+            if idempotent and self._already_written(src_sha_fn(), dd_if, skip):
+                print(f"  SKIP {label} (eMMC already matches source)")
+                return
+            write_fn()
+
         # GPT first (push+dd, reliable): commits new geometry so a later failure
         # still lets Android reformat the shrunk userdata and boot.
         if not skip_gpt:
-            self.push_dd("gpt_primary.bin", DISK, 0, "GPT-primary")
-            self.push_dd("gpt_backup.bin", DISK, self.device.gpt_backup_lba, "GPT-backup")
+            ensure("GPT-primary", lambda: self._sha_file(os.path.join(A, "gpt_primary.bin")),
+                   DISK, 0, lambda: self.push_dd("gpt_primary.bin", DISK, 0, "GPT-primary"))
+            ensure("GPT-backup", lambda: self._sha_file(os.path.join(A, "gpt_backup.bin")),
+                   DISK, self.device.gpt_backup_lba,
+                   lambda: self.push_dd("gpt_backup.bin", DISK, self.device.gpt_backup_lba, "GPT-backup"))
         self._verify_gpt()
         # All /data-staged (push+dd) + small writes go NOW, while userdata is still
         # healthy. The CE writes further down land in the carve by raw offset and can
         # disturb a live userdata fs (its SB is wiped right after), which could flip
         # /data read-only and break a later push. So kernel/dtb/misc/env first.
-        self.push_dd("boota.img", f"/dev/block/by-name/boot{ce_slot}", 0, f"boot{ce_slot}")
-        self.push_dd("dtboa.img", f"/dev/block/by-name/dtbo{ce_slot}", 0, f"dtbo{ce_slot}")
+        ensure(f"boot{ce_slot}", lambda: self._sha_file(os.path.join(A, "boota.img")),
+               f"/dev/block/by-name/boot{ce_slot}", 0,
+               lambda: self.push_dd("boota.img", f"/dev/block/by-name/boot{ce_slot}", 0, f"boot{ce_slot}"))
+        ensure(f"dtbo{ce_slot}", lambda: self._sha_file(os.path.join(A, "dtboa.img")),
+               f"/dev/block/by-name/dtbo{ce_slot}", 0,
+               lambda: self.push_dd("dtboa.img", f"/dev/block/by-name/dtbo{ce_slot}", 0, f"dtbo{ce_slot}"))
         # A/B misc: aligned 512-byte sector @ sector 4 (offset 0x800), on-device b64
         # (a seek'd nc->dd write to the small misc partition did not persist).
-        self.write_sector_b64(os.path.join(self.artdir, "misc_sector.bin"),
-                              "/dev/block/by-name/misc", 4)
+        ensure("A/B misc", lambda: self._sha_file(os.path.join(A, "misc_sector.bin")),
+               "/dev/block/by-name/misc", 4,
+               lambda: self.write_sector_b64(os.path.join(A, "misc_sector.bin"),
+                                             "/dev/block/by-name/misc", 4))
         self._verify_misc(ce_slot)
         # env (push+dd; a bad env just falls back to default -> Android still boots)
-        self.push_dd("env_target.bin", "/dev/block/by-name/env", 0, "env")
+        ensure("env", lambda: self._sha_file(os.path.join(A, "env_target.bin")),
+               "/dev/block/by-name/env", 0,
+               lambda: self.push_dd("env_target.bin", "/dev/block/by-name/env", 0, "env"))
         self._verify_env(ce_slot)
         # Blank the Amlogic proprietary partition table (MPT) so the CoreELEC kernel
         # falls back to the GPT and can see CE_FLASH/CE_STORAGE. Non-carve, idempotent.
@@ -432,8 +488,10 @@ class Ctx:
         # CoreELEC filesystems LAST: MUST nc-stream -- they land in the carve by raw
         # offset, so staging them on userdata would be the read-during-overwrite
         # brick race; too big to push anyway. After this, only the SB wipe + sync.
-        self.write_offset("ce_flash.img", s["CE_FLASH"][0], "CE_FLASH")
-        self.write_offset("ce_storage.img", s["CE_STORAGE"][0], "CE_STORAGE")
+        ensure("CE_FLASH", lambda: self._sha_image_raw("ce_flash.img"), DISK, s["CE_FLASH"][0],
+               lambda: self.write_offset("ce_flash.img", s["CE_FLASH"][0], "CE_FLASH"))
+        ensure("CE_STORAGE", lambda: self._sha_image_raw("ce_storage.img"), DISK, s["CE_STORAGE"][0],
+               lambda: self.write_offset("ce_storage.img", s["CE_STORAGE"][0], "CE_STORAGE"))
         # secondary measure: zero the userdata superblock. The PRIMARY, deterministic
         # reformat trigger is the BCB armed at the end of the install (arm_factory_reset);
         # this SB wipe by itself is undone by a clean reboot's cached-superblock writeback
