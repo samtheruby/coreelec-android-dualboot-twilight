@@ -6,7 +6,29 @@ Resolve the adb device serial for the installer scripts.
 omitted and exactly one device is attached, that one is used (the common case for a
 single USB stick); with none or several attached, it exits with guidance.
 """
-import subprocess, sys
+import os, subprocess, sys
+
+
+def _prepend_bundled_platform_tools():
+    """Put a bundled platform-tools/ first on PATH so adb/fastboot resolve to it
+    without a separate Android SDK install. Imported by every adb/fastboot-using
+    script (they all import adb_serial), so this one hook covers them all.
+
+    Checks, relative to this file, both the dist layout (partB-installer/platform-tools,
+    one level up) and the source layout (repo-root/platform-tools, two levels up).
+    Silently no-ops when absent -- callers then fall back to whatever's on PATH."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    exe = "adb.exe" if os.name == "nt" else "adb"
+    for cand in (os.path.join(here, os.pardir, "platform-tools"),            # dist bundle
+                 os.path.join(here, os.pardir, os.pardir, "platform-tools")):  # source checkout
+        cand = os.path.abspath(cand)
+        if os.path.isfile(os.path.join(cand, exe)):
+            os.environ["PATH"] = cand + os.pathsep + os.environ.get("PATH", "")
+            return cand
+    return None
+
+
+_BUNDLED_PT = _prepend_bundled_platform_tools()
 
 
 def list_devices():
@@ -14,7 +36,8 @@ def list_devices():
     try:
         out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
     except FileNotFoundError:
-        sys.exit("adb not found on PATH -- install Android platform-tools")
+        sys.exit("adb not found on PATH -- install Android platform-tools "
+                 "(or drop a platform-tools/ folder next to the installer)")
     devs = []
     for ln in out.splitlines()[1:]:        # skip the "List of devices attached" header
         p = ln.split()

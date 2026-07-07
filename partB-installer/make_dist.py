@@ -15,11 +15,13 @@ Bundle layout (mirrors the repo so the driver's imports work unchanged):
     blockota/ blockgms/ toolbox_export/   (Magisk modules: module.prop + service.sh)
     payload/remote/  (99-xiaomi-remote.hwdb xiaomi.xml)
     flash/      user-update.sh   (CoreELEC OS-update self-heal hook)
-    INSTALL.md  SHA256SUMS.txt
+    platform-tools/  adb.exe fastboot.exe + DLLs (bundled; PATH-prepended at runtime)
+    README.md  SHA256SUMS.txt
 """
 import os, glob, shutil, gzip, zipfile, hashlib, argparse, sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(ROOT)           # platform-tools/ + README.md live at the repo root
 ART = os.path.join(ROOT, "artifacts")
 sys.path.insert(0, os.path.join(ROOT, "build"))
 import devices  # noqa: E402
@@ -125,8 +127,22 @@ def main():
             raise SystemExit(f"missing {dev.slug}/{f}[.gz] -- run build/build_all.py --device {dev.slug}")
         print(f" {os.path.getsize(dst)//1048576} MiB")
 
-    open(os.path.join(DIST, "INSTALL.md"), "w", newline="\n", encoding="utf-8").write(
-        INSTALL_MD.replace("{DEVICE}", dev.name))
+    # platform-tools/ -- bundle Google's adb/fastboot so the end user needs no
+    # separate Android SDK install. adb_serial.py prepends dist/platform-tools/ to
+    # PATH at runtime. Windows build as shipped (adb.exe + DLLs); ships Google's
+    # NOTICE.txt alongside. Absent -> warn; bundle then needs adb on the user's PATH.
+    pt_src = os.path.join(REPO_ROOT, "platform-tools")
+    if os.path.isdir(pt_src):
+        shutil.copytree(pt_src, os.path.join(DIST, "platform-tools"))
+        n = sum(len(fs) for _, _, fs in os.walk(pt_src))
+        print(f"  bundled platform-tools/ ({n} files)")
+    else:
+        print("  WARNING: platform-tools/ not found at repo root -- end user will "
+              "need adb/fastboot on PATH")
+
+    # README.md -- the top-level guide rides along in the bundle root (the single
+    # user-facing doc; the old generated INSTALL.md was redundant and was removed).
+    shutil.copy2(os.path.join(REPO_ROOT, "README.md"), os.path.join(DIST, "README.md"))
 
     # SHA256SUMS
     lines = []
@@ -154,178 +170,6 @@ def main():
             p = os.path.join(r, f)
             print(f"  {os.path.relpath(p, DIST):<40} {os.path.getsize(p):>12,} B")
 
-
-INSTALL_MD = """# CoreELEC internal dual-boot installer -- staged ({DEVICE})
-
-Self-contained. Needs only **Python 3** + **adb** and a **stock, rooted, unlocked
-{DEVICE}** (Amlogic s7d / S905X5M). No WSL / build step.
-
-> Stage 1 is locked to the {DEVICE} (identified by model + eMMC size). It
-> shrinks/erases userdata (factory-reset-like);
-> pre-flight refuses non-stock / already-modified units. Stage 2's app + GMS block
-> are generic to Google/Android TV; stage 2a is Xiaomi-only.
-
-Prep on the stick: Developer options + ADB on, bootloader unlocked (most sticks were
-never unlocked -- see stage_unlock below). Connect by **USB** (plug in, authorize the
-prompt); confirm `adb devices`. With just one device attached you can omit `--serial`
-and the tool auto-picks it; with several attached, pass `--serial <serial>` (the USB id
-from `adb devices`).
-
-## Stage_unlock -- unlock the bootloader (run before stage_magisk, DESTRUCTIVE)
-`stage_magisk` flashes via fastboot, which a **locked** bootloader refuses. Most sticks
-were never unlocked, so run this first. **Unlocking factory-resets the stick.** Skip if
-`fastboot getvar unlocked` already shows `unlocked: yes`.
-
-With **USB connected**, run:
-```
-python installer/install.py stage_unlock --yes
-```
-Reboots into the bootloader (a Mi-logo splash appears on the stick), checks the lock state
-with `fastboot getvar unlocked`, and -- if locked -- runs `fastboot flashing unlock` +
-`fastboot flashing unlock_critical` (confirm on the device with the remote/volume+power keys
-if prompted), then reboots. Because unlocking wipes the stick, **re-setup Android from
-scratch** (skip Google sign-in if you like), re-enable Developer options + ADB, reconnect,
-then run stage_magisk.
-
-## Stage_magisk -- install Magisk and flash patched init_boot (run before stage 0)
-If the unit is not yet rooted, use this step to get root before stage 0 requires it. The
-bootloader must be **unlocked** first (see stage_unlock).
-
-With **USB connected** (required for the fastboot flash), run:
-```
-python installer/install.py stage_magisk
-```
-The script automatically:
-1. Installs the bundled Magisk APK via adb
-2. Identifies the unit (model + eMMC size) and picks its bundled patched `init_boot`
-3. **Firmware-match guard:** reads the build fingerprint baked into that image
-   (`ro.bootimage.build.fingerprint`) and compares it to the unit's live value -- if they
-   differ it **aborts without flashing** (a mismatched init_boot can bootloop)
-4. Reboots into the bootloader and flashes the pre-patched `init_boot` of the **active slot**
-5. Reboots back to Android and verifies root
-
-If root is not immediately confirmed, open the Magisk app to complete any first-time setup,
-then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root is already active.
-
-> **Required firmware: HyperOS `V816.0.7.0` (Android 14).** This bundle's `init_boot` is patched
-> from that exact build (stick `V816.0.7.0.UZFAATK`, box `V816.0.7.0.UZFAABX`). Check your unit with
-> `adb shell getprop ro.bootimage.build.fingerprint`. If it's on a different build, stage_magisk
-> refuses it -- either update the unit to `V816.0.7.0`, or patch your own `init_boot` (extract from
-> your OTA, patch in the Magisk app) and pass `--magisk-img <path>`, which skips the guard.
-
-## Stage 0 -- preflight + backups (read-only)
-```
-python installer/install.py stage0
-```
-Checks it is a stock, rooted {DEVICE} and pulls per-region backups to `pulled_backups/`.
-
-## Stage 1 -- CORE install  (DESTRUCTIVE; ends at first reboot)
-```
-python installer/install.py stage1 --yes      # omit --yes = dry-run
-adb reboot
-```
-Writes GPT + CE_FLASH/CE_STORAGE + kernel/dtb + misc + env; every region is SHA-256
-verified. Then it **arms the bootloader control block** (`misc`: `boot-recovery` +
-`--wipe_data`). The reboot therefore enters **recovery**, which reformats the shrunk
-userdata to its new size and re-keys encryption (factory-reset-like, one-time), then
-boots Android first-boot setup. Let the wipe + setup finish, then reconnect adb and
-run **stage 1b** before stage 2. (The reset also clears the u-boot env gate --
-**stage 2 re-applies it**, so always run stage 2 before trying to boot CoreELEC.)
-
-> Why the BCB and not just a superblock wipe: a clean `adb reboot` makes Android flush
-> the cached original superblock back over the wipe, so the reformat never fires and
-> `/data` is left oversized on the smaller partition. The BCB recovery wipe is the
-> deterministic path (same one `fastboot -w` / OTA use).
-
-## Stage 1b -- re-install Magisk APK (after the stage 1 factory reset)
-```
-python installer/install.py stage1b
-```
-The stage 1 factory reset wipes `/data`, which removes the Magisk APK and its
-root-grant database. The active slot's `init_boot` is **still patched** (that partition is untouched),
-so no fastboot is needed -- only the APK needs to be re-installed.
-
-The script installs the APK, then waits up to 120 s for root confirmation. During that
-window: open the **Magisk app** on the device, complete any first-time setup, and
-**approve the root-access dialog** for ADB shell. Once `uid=0` is confirmed the script
-prints the stage 2 command and exits.
-
-## Stage 2 -- apps + modules  (Android side)
-```
-python installer/install.py stage2
-adb reboot
-```
-- **(Re)assert the env boot gate.** Stage 1's reboot factory-resets userdata via
-  recovery, which on this SoC also resets the u-boot env to stock -- dropping the gate.
-  Stage 2 rebuilds the full gate (generic helpers + `boot_ce`) on the post-reset env so
-  the switcher works. (Add `--default coreelec` here too if you set it in stage 1.)
-- **Reboot to CoreELEC** app + `/flash` update-recovery files (`env_dualboot.bin`,
-  `ce_slot.conf`, hook -- so the dual-boot survives CoreELEC OS updates) *[Xiaomi]*.
-- **toolbox_export** Magisk module *[generic]* -- each Android boot it copies the
-  decrypted BT pairings (`bt_config.conf`) + WiFi/BT MAC to `/flash`, so the CoreELEC
-  Toolbox addon can sync your BT remote into CoreELEC.
-- **blockgms** *[generic Google TV]* -- disables the Play Services *system-update*
-  components so "Check for updates" can't push an A/B OTA that would clobber CoreELEC
-  (GMS core untouched).
-
-## Stage 2a -- Xiaomi auto-update block  (OPTIONAL, Xiaomi only)
-```
-python installer/install.py stage2a
-```
-Installs **blockota** (disables the Xiaomi `com.xiaomi.mitv.updateservice` updater).
-
-## Stage 3 -- CoreELEC side  (after first CoreELEC boot; SSH, not adb)
-Reboot into CoreELEC, note its IP + enable SSH, then from the PC (needs `pip install paramiko`):
-```
-python installer/install.py stage3 --host <coreelec-ip>
-```
-Runs three CoreELEC-side steps:
-- **CoreELEC Toolbox addon** *[generic]* -- extracts the addon (BT-remote sync /
-  default-boot-OS / WiFi-MAC helpers) into Kodi, rescans, and via JSON-RPC **enables it**
-  + turns on **Unknown sources** + **Update official add-ons from = Any repositories**
-  (so the PM4K/TinyPPI zips below install). Turns Kodi's web server on if needed.
-- **Kodi sources** *[generic]* -- adds `PM4K` = `https://pm4k.eu/` and `jamal2362` =
-  `https://ce-repo.github.io/repository.jamal2362/` under `<files>` (Kodi can't reload
-  sources.xml live, so this stops Kodi, edits, restarts ~15s). Then *Add-ons > Install
-  from zip file* to install PM4K (`script.plexmod`) + TinyPPI (`script.tinyppi`).
-- **Xiaomi remote keymap** *[Xiaomi]* -- auto-detected; remaps the remote's special
-  buttons (OK->Select, Netflix->PM4K, Voice & PrimeVideo->TinyPPI). Skipped on
-  non-Xiaomi units; `--xiaomi` forces it, `--no-keymap` skips it.
-
-All stage-3 files land in `/storage`, so they survive CoreELEC OS updates. The two
-**[generic]** steps also run on any CoreELEC box, standalone:
-```
-python installer/deploy_toolbox_addon.py --host <coreelec-ip>
-python installer/deploy_kodi_sources.py  --host <coreelec-ip>
-```
-
-## verify -- layout/env readiness (read-only, Android)
-```
-python installer/install.py verify
-```
-
-## Using it
-- Normal reboot -> Android (default).
-- Open **Reboot to CoreELEC** -> CoreELEC. A normal reboot returns to Android.
-- After a CoreELEC OS update the dual-boot self-heals (the `/flash/user-update.sh`
-  hook re-syncs the kernel/dtb and restores the env gate). If the switcher ever
-  stops working post-update: `python installer/reassert_env_gate.py --boot-ce 1`.
-
-## Boot default -- Android or CoreELEC
-By default a normal reboot boots **Android** (the app enters CoreELEC). To make
-**CoreELEC the default** instead:
-- at install: add `--default coreelec` to stage1, OR
-- on an installed unit (from Android): `python installer/reassert_env_gate.py --default coreelec`
-Then a normal power-on boots CoreELEC, and CoreELEC's built-in **"reboot to
-eMMC/nand"** option boots Android (one-shot; next reboot returns to CoreELEC). If
-CoreELEC ever fails to boot, u-boot automatically falls through to Android -- so
-CoreELEC-default is safe. Flip back with `--default android`.
-
-## Reverse
-Restore `env`, `misc`, `boot_<slot>`, `dtbo_<slot>`, GPT from `pulled_backups/`;
-remove the `blockgms_sysupdate` / `blockota_twilight` Magisk modules to restore OTA.
-Worst case: USB-burn the factory image.
-"""
 
 
 if __name__ == "__main__":

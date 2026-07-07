@@ -17,7 +17,7 @@ Xiaomi 4k 2nd Gen or a Xiaomi TV Box S 3rd Gen.
 
 **PC (Windows/Linux/macOS):**
 - **Python 3** (3.8+)
-- **Android platform-tools** in the `PATH`
+- **Android platform-tools** in the `PATH` or extracted into the installer folder
 - **paramiko** for the CoreELEC-side stage: `pip install paramiko`
 - **The prepared installer bundle** — download the release for the device you have from the
   [latest Release](../../releases/latest)
@@ -30,7 +30,7 @@ Xiaomi 4k 2nd Gen or a Xiaomi TV Box S 3rd Gen.
 
 ## Step-by-step install (start here)
 
-Follow these steps in order. Run every command from a terminal opened inside the folder you unzipped.
+**Follow these steps in order. Run every command from a terminal opened inside the folder you unzipped. If your device is already rooted with Magisk installed, skip STEPS 3 and 4.**
 
 One placeholder appears in the commands:
 - `<coreelec-ip>` is your device's address once it is running CoreELEC.
@@ -54,31 +54,30 @@ With the device connected by USB, run:
 ```
 python installer/install.py stage_unlock --yes
 ```
-The device restarts into a setup mode and shows a **Mi logo**. If the TV asks you to confirm, use the remote (or the volume and power buttons) to approve. This step checks first; if your device is already unlocked it just reboots and moves on. When it unlocks, the device wipes itself and restarts into first-time setup.
+The device restarts into fastboot mode and shows the **Mi logo**. This step checks first; if your device is already unlocked it just reboots and moves on. When it unlocks, the device wipes itself and restarts into first-time setup.
 
 After it restarts, set the device up again:
 1. Finish first-time setup (you can skip signing in to Google).
-2. Turn **USB debugging** and **OEM unlocking** back on.
-3. Reconnect the USB cable.
+2. Turn **USB debugging** back on.
 
 **4. Give the device root access (needs USB)**
 ```
 python installer/install.py stage_magisk
 ```
-This installs the Magisk app and flashes the init_boot.img that grants root. It checks that the file matches your device's exact software version and stops if it does not. The device restarts into setup mode, flashes the file, and restarts into Android. Once the device reboots open the **Magisk app** to allow it to finish its setup. To check root worked:
+This installs the Magisk app and flashes the init_boot.img that grants root. It checks that the file matches your device's exact software version and stops if it does not. The device restarts into fastboot once more, flashes the file, and restarts into Android. Once the device reboots open the **Magisk app** to allow it to finish its setup. To check root worked after the reboot run:
 ```
 adb shell su -c id
 ```
 Magisk will ask if you want to grant root access, allow it and adb should return `uid=0`.
 
-**5. Back up the device (safe, changes nothing)**
+**5. Back up the device**
 ```
 python installer/install.py stage0
 ```
 This saves a full backup to a `pulled_backups` folder and checks the device is ready. Do not skip it; the undo steps later need this backup.
 
 **6. Install CoreELEC (this erases your apps and data on the device)**
-First do a test run that only prints the plan and changes nothing:
+First do a test run that runs the pre-flight checks and ensures the device is ready:
 ```
 python installer/install.py stage1
 ```
@@ -103,7 +102,7 @@ The tool pauses and asks you to open the **Magisk app** on the device, finish it
 ```
 python installer/install.py stage2
 ```
-This installs the **Reboot to CoreELEC** app and the pieces that let you switch between the two systems and keep updates from breaking CoreELEC. Do not open CoreELEC before this step; the switch will not work yet.
+This installs the **Reboot to CoreELEC** app and the pieces that let you switch between the two systems and keep updates from breaking CoreELEC.
 
 **10. Block Xiaomi system updates**
 ```
@@ -115,10 +114,15 @@ adb reboot
 ```
 
 **11. Start CoreELEC**
-On the device, open the **Reboot to CoreELEC** app and choose to restart into CoreELEC.
+On the device, open the **Reboot to CoreELEC** app and choose to Reboot to enter CoreELEC.
 
 **12. Finish CoreELEC setup**
-Once the device is running CoreELEC, make sure to enable **SSH** in CoreELEC's settings if it was not enabled during initial setup and note your IP address (`<coreelec-ip>`). Then from the PC:
+Once the device is running CoreELEC, make sure to enable **SSH** in CoreELEC's settings if it was not enabled during initial setup and note your IP address (`<coreelec-ip>`). Next enable the JSON-RPC under **Services -> Control** and set the following settings:
+- Set the Password to kodi (all lowercase)
+- Enable Allow Remote Control via HTTP
+- Enable Allow Remote control from applications on other systems
+
+Then from the PC run:
 ```
 python installer/install.py stage3 --host <coreelec-ip>
 ```
@@ -176,7 +180,8 @@ partB-installer/
   blockgms/ blockota/ toolbox_export/   (Magisk modules)
   flash/        user-update.sh                              (CoreELEC OS-update self-heal hook)
   payload/remote/   99-xiaomi-remote.hwdb  xiaomi.xml       (remote button mapping)
-  INSTALL.md    SHA256SUMS.txt                              (generated into the bundle)
+  platform-tools/   adb.exe fastboot.exe + DLLs             (bundled on Windows; added to PATH automatically)
+  README.md     SHA256SUMS.txt                              (this guide + checksums)
 ```
 
 It needs only Python 3 + adb (+ paramiko for stage 3)
@@ -186,7 +191,6 @@ It needs only Python 3 + adb (+ paramiko for stage 3)
 ## Credits
 
 This work builds on research and tools from several people:
-
 - **[dangerouslaser](https://github.com/dangerouslaser/ugoos-am9-pro-coreelec-emmc)** — Ugoos AM9
   Pro CoreELEC-on-eMMC research, the Amlogic USB-DNL burn/restore tooling, and the
   `cfgload` + `mount-storage.sh` boot method that informed our partition + boot analysis.
