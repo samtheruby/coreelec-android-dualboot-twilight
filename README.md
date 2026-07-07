@@ -1,7 +1,5 @@
-CoreELEC ⇄ Android internal dual-boot for the Xiaomi 4k 2nd Gen and Xiaomi TV Box S 3rd Gen
-
-Method to Boot **CoreELEC from internal eMMC** alongside the stock **Android (Google TV)** OS on a
-Xiaomi 4k 2nd Gen and Xiaomi TV Box S 3rd Gen **No partition is deleted, per-device identity is preserved, and it is fully reversible.**
+This Repo offers a method to boot **CoreELEC from internal eMMC** alongside the stock **Google TV** on a
+Xiaomi 4k 2nd Gen or a Xiaomi TV Box S 3rd Gen.
 
 > **Hardware scope:** Xiaomi 4k 2nd Gen and Xiaomi TV Box S 3rd Gen codename `MiTV-AFMU1` and `MiTV-AFMU0`, For porting to other devices see [`research.md`](research.md).
 
@@ -32,120 +30,123 @@ Xiaomi 4k 2nd Gen and Xiaomi TV Box S 3rd Gen **No partition is deleted, per-dev
 
 ## Step-by-step install (start here)
 
-Follow these in order. `<ip:port>` is your stick's ADB address (e.g. `192.168.1.50:5555`);
-`<coreelec-ip>` is its IP once booted into CoreELEC. Run every command from inside the
-unzipped bundle folder.
+Follow these steps in order. Run every command from a terminal opened inside the folder you unzipped.
 
-**1. Get ready**
-- On the stick: enable **Developer options → USB debugging and OEM Unlocking**
-- On the PC: install **Python 3** and **adb**, then run `pip install paramiko`.
-- Download `partB-installer-dist.zip` from the [latest Release](../../releases/latest) and unzip it.
+Two placeholders appear in the commands:
+- `<ip:port>` is your device's address for the Android steps, for example `192.168.1.50:5555`.
+- `<coreelec-ip>` is your device's address once it is running CoreELEC.
 
-**2. Connect** — USB (plug in + authorize) or wireless:
+When only one device is connected you can leave out `--serial <ip:port>`; the tool finds it on its own.
+
+**1. Get ready (do this once)**
+- On your device: open Settings, turn on **Developer options**, then turn on **USB debugging** and **OEM unlocking**.
+- On your PC: install **Python 3** and **Android platform-tools** (this gives you the `adb` and `fastboot` commands). Then run `pip install paramiko`.
+- Download the release for your device from the [latest Release](../../releases/latest) and unzip it.
+
+**2. Connect your device to the PC**
+Plug in by USB and approve the "Allow USB debugging" prompt on the TV, or connect over Wi-Fi with `adb connect <ip:port>`. Then check the PC sees it:
 ```
-adb connect <ip:port>  # wireless only; for USB just plug in and authorize the prompt
-adb devices            # confirm your stick is listed (USB id or ip:port)
+adb devices
 ```
-> In every command below you can drop `--serial <…>` when only one device is attached (it
-> auto-detects), or pass the **USB id** instead of `ip:port`. USB is faster/steadier for stage 1.
+Your device should show up in the list. Steps 3 and 4 need a USB cable, so use USB if you can.
 
-**3. Unlock the bootloader — ⚠️ THIS WIPES THE STICK (skip if already unlocked)**
-Skip if `fastboot getvar unlocked` already shows `unlocked: yes`. Most sticks were never
-unlocked, and a locked bootloader makes the next step (fastboot flash) fail.
-
-With **USB connected**, run:
+**3. Unlock the bootloader (this erases everything on the device)**
+With the device connected by USB, run:
 ```
 python installer/install.py stage_unlock --serial <ip:port> --yes
 ```
-Reboots into the bootloader (a **Mi logo** splash appears on the stick), checks the lock
-state with `fastboot getvar unlocked`, and — if locked — runs `fastboot flashing unlock`
-+ `fastboot flashing unlock_critical`. If the stick's screen asks you to confirm, use the
-remote/volume+power keys to approve. `getvar unlocked` then returns `yes` and it reboots.
-> Unlocking **factory-resets the stick**. Afterwards walk through Android first-time setup
-> from scratch (you can skip Google sign-in), re-enable **USB + Network debugging**, and
-> `adb connect <ip:port>` again before continuing.
+The device restarts into a setup mode and shows a **Mi logo**. If the TV asks you to confirm, use the remote (or the volume and power buttons) to approve. This step checks first; if your device is already unlocked it just reboots and moves on. When it unlocks, the device wipes itself and restarts into first-time setup.
 
-**4. Root the stick with Magisk (skip if already rooted)**
-Skip if `adb shell su -c id` already returns `uid=0`.
+After it restarts, set the device up again:
+1. Finish first-time setup (you can skip signing in to Google).
+2. Turn **USB debugging** and **OEM unlocking** back on.
+3. Reconnect (plug in by USB again, or run `adb connect <ip:port>`).
 
-With **USB connected** (required for the fastboot flash step), run:
+**4. Give the device root access (needs USB)**
 ```
 python installer/install.py stage_magisk --serial <ip:port>
 ```
-The script installs the bundled Magisk APK, identifies the unit and picks its patched
-`init_boot`, **verifies that image matches the unit's exact firmware build** (aborts rather than
-risk a bootloop on a mismatch), then flashes the **active slot's** `init_boot` and reboots to
-Android. If root is not immediately confirmed, open the Magisk app to complete first-time setup,
-then verify: `adb shell su -c id` → `uid=0`.
+This installs the Magisk app and flashes the init_boot.img that grants root. It checks that the file matches your device's exact software version and stops if it does not. The device restarts into setup mode, flashes the file, and restarts into Android. Once the device reboots open the **Magisk app** to allow it to finish its setup. To check root worked:
+```
+adb shell su -c id
+```
+Magisk will ask if you want to grant root access, allow it and adb should return `uid=0`.
 
-**5. Back up + preflight (safe, no changes)**
+**5. Back up the device (safe, changes nothing)**
 ```
 python installer/install.py stage0 --serial <ip:port>
 ```
-Saves a full backup of every region to `pulled_backups/` and refuses to go on unless the stick is a clean, stock, rooted `twilight`. **Don't skip this** — it's what `restore` uses later.
+This saves a full backup to a `pulled_backups` folder and checks the device is ready. Do not skip it; the undo steps later need this backup.
 
-**6. Install — ⚠️ THIS WIPES ANDROID USER DATA**
-Start with a dry run -
+**6. Install CoreELEC (this erases your apps and data on the device)**
+First do a test run that only prints the plan and changes nothing:
 ```
 python installer/install.py stage1 --serial <ip:port>
 ```
-Once it returns with OK you can do the destructive install
+If it finishes with OK, run the real install and restart:
 ```
 python installer/install.py stage1 --serial <ip:port> --yes
 adb -s <ip:port> reboot
 ```
-> This step writes the new partition layout + CoreELEC. Every region is SHA-256 verified, then a recovery wipe is armed. On `reboot` the stick enters **recovery**, reformats its (now smaller) storage one time, and boots Android. (Leave off `--yes` to do a dry run that only prints the plan.)
+On restart the device resizes its storage once and boots back into the Android first-time setup.
 
-**7. Re-setup Android, then reconnect**
-- Let the recovery wipe + Android first-time setup finish (it reboots itself once). Walk through setup, re-enable USB/Network debugging.
-- `adb connect <ip:port>` again (the address may change).
+**7. Set the device up again, then reconnect**
+Go through the initial setup again, turn **USB debugging** back on, and reconnect with `adb connect <ip:port>` if using wireless debugging. The address may have changed.
 
-**8. Re-install Magisk APK (stage 1's factory reset wiped it)**
+**8. Put the Magisk app back**
+Step 6 removed it. Re-install it:
 ```
 python installer/install.py stage1b --serial <ip:port>
 ```
-The factory reset wipes `/data` including the Magisk APK and its root-grant database. `init_boot_a` is still patched so no fastboot is needed — this just re-installs the APK. When prompted, open the **Magisk app** on the stick, complete first-time setup, and **approve the root-access dialog** for ADB shell. The script waits up to 120 s for `uid=0` confirmation, then prints the stage 2 command.
+The tool pauses and asks you to open the **Magisk app** on the device, finish its setup, and allow the root-access request. Once root is confirmed, press Enter in the terminal.
 
-**9. Apps + modules**
+**9. Install the switcher app and modules**
 ```
 python installer/install.py stage2 --serial <ip:port>
 ```
-Re-applies the u-boot boot gate (stage 1's factory reset clears it), then installs the **Reboot to CoreELEC** app, the OS-update self-heal files, and the modules that keep updates from clobbering CoreELEC. **Don't try CoreELEC before stage 2** — without this step the switcher can't enter it. Reboot after this stage with `adb -s <ip:port> reboot` only if you are not running stage2a.
+This installs the **Reboot to CoreELEC** app and the pieces that let you switch between the two systems and keep updates from breaking CoreELEC. Do not open CoreELEC before this step; the switch will not work yet.
 
-**10. (Optional) Block the Xiaomi updater too**
+**10. Block Xiaomi system updates**
 ```
 python installer/install.py stage2a --serial <ip:port>
+```
+Next Reboot again to apply the changes:
+```
 adb -s <ip:port> reboot
 ```
 
-**11. Boot into CoreELEC**
-- After the reboot, open the **Reboot to CoreELEC** app on the stick and reboot into CoreELEC.
+**11. Start CoreELEC**
+On the device, open the **Reboot to CoreELEC** app and choose to restart into CoreELEC.
 
 **12. Finish CoreELEC setup**
+Once the device is running CoreELEC, make sure to enable **SSH** in CoreELEC's settings if it was not enabled during initial setup and note your IP address (`<coreelec-ip>`). Then from the PC:
 ```
 python installer/install.py stage3 --host <coreelec-ip>
 ```
-Adds the Toolbox addon, the PM4K + TinyPPI download sources, and (on Xiaomi) the remote-button keymap.
+This adds the Toolbox add-on, the PM4K and TinyPPI download sources, and (on Xiaomi) the remote-button mapping.
 
-**Done.** Normal reboot → **Android**. Open **Reboot to CoreELEC** → **CoreELEC**.
-To flip which one is the default, see [Using it](#using-it). To undo everything, see
+**Done.** A normal restart goes to **Android**. Open **Reboot to CoreELEC** to switch to **CoreELEC**.
+To change which one starts by default, see [How To Use](#how-to-use). To undo everything, see
 [Reverse / restore](#reverse--restore).
 
 ---
 
-## Using it
+## How To Use
 
-- **Normal reboot → Android** (default). Open **Reboot to CoreELEC** → CoreELEC. A normal reboot
-  returns to Android.
-- **Make CoreELEC the default** instead: add `--default coreelec` to stage1, or on an installed
-  unit run `python installer/reassert_env_gate.py --serial <ip:port> --default coreelec`. Then a
-  normal power-on boots CoreELEC, and CoreELEC's built-in **"reboot to eMMC/nand"** boots Android.
-  If CoreELEC ever fails to boot, u-boot falls through to Android automatically — so
-  CoreELEC-default is safe. Flip back with `--default android`.
-- **CoreELEC OS updates self-heal.** A CE update rewrites `/flash` and resets the u-boot boot gate;
-  the `/flash/user-update.sh` hook (runs in the CE initramfs) re-syncs the kernel/dtb and restores
-  the gate automatically. If the switcher ever stops working post-update:
-  `python installer/reassert_env_gate.py --serial <ip:port> --boot-ce 1`.
+**Day to day**
+- **Switch to CoreELEC:** open the **Reboot to CoreELEC** app on the device and choose CoreELEC.
+- **Switch back to Android:** just restart the device. A normal restart always goes to Android.
+
+**Make CoreELEC start by default instead**
+Out of the box a normal restart goes to Android. To make the device boot straight into CoreELEC, run from the PC, use the CoreELEC toolbox app in CoreELEC to switch the default.
+
+You can also set this while installing by adding `--default coreelec` to the Step 6 command.
+
+**If switching stops working after a CoreELEC update**
+CoreELEC updates repair the dual-boot setup on their own. If a switch ever stops working right after one, run from the PC:
+```
+python installer/reassert_env_gate.py --serial <ip:port> --boot-ce 1
+```
 
 ---
 
