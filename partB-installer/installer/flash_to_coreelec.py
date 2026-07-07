@@ -26,6 +26,14 @@ ART = os.path.join(HERE, "..", "artifacts")
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 
+# Build stamp printed in every run header (flash + finish). A hardcoded constant on
+# PURPOSE: it is compiled into the bytecode, so a stale __pycache__/*.pyc (the classic
+# "I copied the new .py but Python kept the old compiled copy" trap) prints the OLD
+# value -- proving which code actually executed, not just which source sits on disk.
+# Bump on every installer change. history: r1=v1.2.3, r2=nc+USB write retry,
+# r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow).
+BUILD = "1.2.3-r3 (sha-verify>=4GiB + write-retry)"
+
 DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
 NC = "/vendor/bin/busybox nc"
@@ -68,6 +76,7 @@ def main():
 
     print(f"=== CoreELEC dual-boot installer (serial={args.serial} "
           f"mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
+    print(f"    build={BUILD}")
     ce_slot = g.preflight()          # identifies the device -> sets g.device / g.artdir
     require_artifacts(g.device)
     g.build_target_blobs(ce_slot)

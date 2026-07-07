@@ -38,6 +38,7 @@ def main():
     g = F.Ctx(a.serial, dry, a.port)
 
     print(f"=== finish install (serial={a.serial} mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
+    print(f"    build={F.BUILD}")
     # Identify by model + eMMC size; geometry-dependent completion -> require_layout=True.
     dev = devices.identify(g.getprop,
                            devices.sectors_reader(lambda cmd: g.su(cmd)[0]),
