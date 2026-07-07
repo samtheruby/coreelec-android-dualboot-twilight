@@ -138,7 +138,7 @@ To change which one starts by default, see [How To Use](#how-to-use). To undo ev
 - **Switch back to Android:** just restart the device. A normal restart always goes to Android.
 
 **Make CoreELEC start by default instead**
-Out of the box a normal restart goes to Android. To make the device boot straight into CoreELEC, run from the PC, use the CoreELEC toolbox app in CoreELEC to switch the default.
+Out of the box a normal restart goes to Android. To make the device boot straight into CoreELEC, use the CoreELEC toolbox app in CoreELEC to switch the default.
 
 You can also set this while installing by adding `--default coreelec` to the Step 6 command.
 
