@@ -16,8 +16,8 @@ Backups are pulled to the PC BEFORE any write, so the install can't destroy them
 Flow: preflight -> per-unit env/misc blobs -> PC-side backups -> streamed writes
 (GPT first, env last, each verified) -> disable OTA.
 
-  python flash_to_coreelec.py --serial <ip:port> --dry-run
-  python flash_to_coreelec.py --serial <ip:port> --yes
+  python flash_to_coreelec.py --serial <serial> --dry-run
+  python flash_to_coreelec.py --serial <serial> --yes
 """
 import argparse, base64, gzip, hashlib, os, socket, subprocess, sys, struct, time
 
@@ -45,7 +45,7 @@ def secs(dev):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--yes", action="store_true", help="perform real writes")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--port", type=int, default=5599)
@@ -578,7 +578,7 @@ class Ctx:
         print("  " + (out.strip() or "(no output)"))
         print("  NOTE: this disable is erased by the first-boot userdata reformat.")
         print("  For DURABLE blocking, after first boot run:")
-        print("    python install_blockota.py --serial <ip:port>   (installs the Block-OTA Magisk module)")
+        print("    python install_blockota.py --serial <serial>   (installs the Block-OTA Magisk module)")
 
     # ---- 7. arm the userdata reformat (deterministic) ----------------------
     def arm_factory_reset(self):

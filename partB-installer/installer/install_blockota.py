@@ -7,8 +7,8 @@ userdata, which would erase the module otherwise). It places the module directly
 into /data/adb/modules/<id>/ (Magisk loads it on next boot); no flashable zip
 needed. Then reboot to activate.
 
-  python install_blockota.py --serial <ip:port>          # install
-  python install_blockota.py --serial <ip:port> --verify  # check (after reboot)
+  python install_blockota.py --serial <serial>          # install
+  python install_blockota.py --serial <serial> --verify  # check (after reboot)
 """
 import argparse, os, subprocess, sys
 
@@ -23,7 +23,7 @@ MDIR = f"/data/adb/modules/{MODID}"
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
     import adb_serial

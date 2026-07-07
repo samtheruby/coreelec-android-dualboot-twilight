@@ -9,7 +9,7 @@ Magisk-patched init_boot — that is the ONLY destructive prereq).
 
 Run on the target booted into Android with adb reachable:
 
-    python porting_recon.py --serial <ip:port|usbid>
+    python porting_recon.py --serial <serial>
 
 Produces (in ./recon_out/):
     recon_report.txt   human-readable findings
@@ -323,7 +323,7 @@ def save(name, data):
 # ---- main -------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="CoreELEC dual-boot porting recon (read-only)")
-    ap.add_argument("--serial", help="adb serial (ip:port or usb id); omit to auto-pick")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick")
     a = ap.parse_args()
     serial = resolve(a.serial)
     os.makedirs(OUT, exist_ok=True)

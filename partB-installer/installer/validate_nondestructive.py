@@ -5,7 +5,7 @@ only -- never writes to the device). Safe to run on the already-modified unit;
 it exercises every per-unit code path with real device data and cross-checks the
 app's Kotlin env codec against the PC envtool.
 
-Usage: python validate_nondestructive.py --serial 192.168.1.195:41243
+Usage: python validate_nondestructive.py --serial <serial>
 """
 import argparse, base64, os, subprocess, sys, struct, zlib
 
@@ -47,7 +47,7 @@ def kotlin_like_set_boot_ce(env, value):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     args = ap.parse_args()
     import adb_serial
     args.serial = adb_serial.resolve(args.serial)

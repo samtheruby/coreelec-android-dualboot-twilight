@@ -10,8 +10,8 @@ verifies ALL regions and disables OTA.
 Safe to re-run (idempotent: it rebuilds blobs from the current device each time;
 env is read fresh, so the gate is re-applied onto whatever env is present).
 
-  python finish_install.py --serial <ip:port> --dry-run
-  python finish_install.py --serial <ip:port> --yes
+  python finish_install.py --serial <serial> --dry-run
+  python finish_install.py --serial <serial> --yes
 """
 import argparse, os, sys
 
@@ -23,7 +23,7 @@ import devices  # noqa: E402  -- stick/box discrimination registry
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--port", type=int, default=5599)
     a = ap.parse_args()

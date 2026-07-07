@@ -17,8 +17,8 @@ Source of truth, in priority order:
   2. device_backups/disk_first2M.bin + disk_last2M.bin (2 MiB each) -- the dev Phase-0
      reference dumps (fallback). Both are verified 32-entry with userdata at the full carve.
 
-  python restore_stock_gpt.py --serial <ip:port>          # recon only (no writes)
-  python restore_stock_gpt.py --serial <ip:port> --yes     # restore, then reboot manually
+  python restore_stock_gpt.py --serial <serial>          # recon only (no writes)
+  python restore_stock_gpt.py --serial <serial> --yes     # restore, then reboot manually
 """
 import argparse, base64, os, struct, subprocess, sys, zlib
 
@@ -133,7 +133,7 @@ def verify_stock_files(dev):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--yes", action="store_true", help="perform the GPT writes")
     ap.add_argument("--no-sbwipe", action="store_true",
                     help="skip the userdata superblock wipe -- safe ONLY when userdata "

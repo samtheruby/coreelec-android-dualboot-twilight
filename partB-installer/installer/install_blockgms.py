@@ -9,9 +9,9 @@ casting keep working. The component-disabled state is PERSISTENT (survives reboo
 this applies it via adb-su (which works, unlike the boot context on some boxes) and
 drops the module so it also re-asserts each boot where it can.
 
-  python install_blockgms.py --serial <ip:port>           # install + apply
-  python install_blockgms.py --serial <ip:port> --verify   # check
-  python install_blockgms.py --serial <ip:port> --revert   # pm enable + (manual) remove module
+  python install_blockgms.py --serial <serial>           # install + apply
+  python install_blockgms.py --serial <serial> --verify   # check
+  python install_blockgms.py --serial <serial> --revert   # pm enable + (manual) remove module
 
 Reversible: --revert re-enables the components; remove the Magisk module to undo fully.
 """
@@ -57,7 +57,7 @@ def apply_disable(serial, verb):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--revert", action="store_true")
     a = ap.parse_args()

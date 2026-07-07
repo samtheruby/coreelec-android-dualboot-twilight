@@ -14,8 +14,8 @@ A bad env is not bricking (u-boot falls back to its built-in default and boots
 Android). Each write is size-checked against the on-device partition and verified
 by read-back (env: CRC + that the gate is absent; misc: factory A/B bytes).
 
-  python restore_env_misc_factory.py --serial <ip:port>          # recon only
-  python restore_env_misc_factory.py --serial <ip:port> --yes     # write
+  python restore_env_misc_factory.py --serial <serial>          # recon only
+  python restore_env_misc_factory.py --serial <serial> --yes     # write
 """
 import argparse, base64, os, subprocess, sys
 
@@ -76,7 +76,7 @@ class Dev:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--yes", action="store_true")
     a = ap.parse_args()
     import adb_serial

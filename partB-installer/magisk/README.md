@@ -26,7 +26,7 @@ device's image from the table above. Add a new device once, in `build/devices.py
 
 Just run (USB must be connected for the fastboot flash step):
 ```
-python installer/install.py stage_magisk --serial <ip:port>
+python installer/install.py stage_magisk
 ```
 The script installs the Magisk APK, identifies the unit, flashes that unit's pre-patched
 `init_boot` into the **active slot** via fastboot, and reboots back to Android.
@@ -59,6 +59,6 @@ If the pre-patched image for your device is not included (or you want to patch a
    ```
    adb pull /sdcard/Download/magisk_patched-*.img magisk/<registered-name>.img
    ```
-6. Run: `python installer/install.py stage_magisk --serial <ip:port>`
+6. Run: `python installer/install.py stage_magisk`
 
 The `*.img` files in this directory are gitignored (device/build-specific binaries).

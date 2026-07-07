@@ -11,11 +11,11 @@ because the raw block reads need `su`.
    - Unlock the bootloader (`fastboot flashing unlock` — this factory-resets the box).
    - Root with a Magisk-patched `init_boot` (standard Magisk flow for this device).
    - Confirm: `adb shell su -c id` → `uid=0`.
-   - Re-enable **USB + Network debugging** after the reset.
+   - Re-enable **USB debugging** after the reset.
 
 2. **Run the recon script** (from the `partB-installer/` folder, PC with `adb` on PATH):
    ```
-   python installer/porting_recon.py --serial <ip:port|usbid>
+   python installer/porting_recon.py --serial <serial>
    ```
    Read-only. Writes nothing to the device.
 

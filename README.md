@@ -32,11 +32,10 @@ Xiaomi 4k 2nd Gen or a Xiaomi TV Box S 3rd Gen.
 
 Follow these steps in order. Run every command from a terminal opened inside the folder you unzipped.
 
-Two placeholders appear in the commands:
-- `<ip:port>` is your device's address for the Android steps, for example `192.168.1.50:5555`.
+One placeholder appears in the commands:
 - `<coreelec-ip>` is your device's address once it is running CoreELEC.
 
-When only one device is connected you can leave out `--serial <ip:port>`; the tool finds it on its own.
+The Android steps run over USB. With a single device plugged in the tool finds it on its own; if you have more than one attached, add `--serial <serial>` (the id shown by `adb devices`).
 
 **1. Get ready (do this once)**
 - On your device: open Settings, turn on **Developer options**, then turn on **USB debugging** and **OEM unlocking**.
@@ -44,27 +43,27 @@ When only one device is connected you can leave out `--serial <ip:port>`; the to
 - Download the release for your device from the [latest Release](../../releases/latest) and unzip it.
 
 **2. Connect your device to the PC**
-Plug in by USB and approve the "Allow USB debugging" prompt on the TV, or connect over Wi-Fi with `adb connect <ip:port>`. Then check the PC sees it:
+Plug in by USB and approve the "Allow USB debugging" prompt on the TV. Then check the PC sees it:
 ```
 adb devices
 ```
-Your device should show up in the list. Steps 3 and 4 need a USB cable, so use USB if you can.
+Your device should show up in the list.
 
 **3. Unlock the bootloader (this erases everything on the device)**
 With the device connected by USB, run:
 ```
-python installer/install.py stage_unlock --serial <ip:port> --yes
+python installer/install.py stage_unlock --yes
 ```
 The device restarts into a setup mode and shows a **Mi logo**. If the TV asks you to confirm, use the remote (or the volume and power buttons) to approve. This step checks first; if your device is already unlocked it just reboots and moves on. When it unlocks, the device wipes itself and restarts into first-time setup.
 
 After it restarts, set the device up again:
 1. Finish first-time setup (you can skip signing in to Google).
 2. Turn **USB debugging** and **OEM unlocking** back on.
-3. Reconnect (plug in by USB again, or run `adb connect <ip:port>`).
+3. Reconnect the USB cable.
 
 **4. Give the device root access (needs USB)**
 ```
-python installer/install.py stage_magisk --serial <ip:port>
+python installer/install.py stage_magisk
 ```
 This installs the Magisk app and flashes the init_boot.img that grants root. It checks that the file matches your device's exact software version and stops if it does not. The device restarts into setup mode, flashes the file, and restarts into Android. Once the device reboots open the **Magisk app** to allow it to finish its setup. To check root worked:
 ```
@@ -74,45 +73,45 @@ Magisk will ask if you want to grant root access, allow it and adb should return
 
 **5. Back up the device (safe, changes nothing)**
 ```
-python installer/install.py stage0 --serial <ip:port>
+python installer/install.py stage0
 ```
 This saves a full backup to a `pulled_backups` folder and checks the device is ready. Do not skip it; the undo steps later need this backup.
 
 **6. Install CoreELEC (this erases your apps and data on the device)**
 First do a test run that only prints the plan and changes nothing:
 ```
-python installer/install.py stage1 --serial <ip:port>
+python installer/install.py stage1
 ```
 If it finishes with OK, run the real install and restart:
 ```
-python installer/install.py stage1 --serial <ip:port> --yes
-adb -s <ip:port> reboot
+python installer/install.py stage1 --yes
+adb reboot
 ```
 On restart the device resizes its storage once and boots back into the Android first-time setup.
 
 **7. Set the device up again, then reconnect**
-Go through the initial setup again, turn **USB debugging** back on, and reconnect with `adb connect <ip:port>` if using wireless debugging. The address may have changed.
+Go through the initial setup again, turn **USB debugging** back on, and re-plug the USB cable.
 
 **8. Put the Magisk app back**
 Step 6 removed it. Re-install it:
 ```
-python installer/install.py stage1b --serial <ip:port>
+python installer/install.py stage1b
 ```
 The tool pauses and asks you to open the **Magisk app** on the device, finish its setup, and allow the root-access request. Once root is confirmed, press Enter in the terminal.
 
 **9. Install the switcher app and modules**
 ```
-python installer/install.py stage2 --serial <ip:port>
+python installer/install.py stage2
 ```
 This installs the **Reboot to CoreELEC** app and the pieces that let you switch between the two systems and keep updates from breaking CoreELEC. Do not open CoreELEC before this step; the switch will not work yet.
 
 **10. Block Xiaomi system updates**
 ```
-python installer/install.py stage2a --serial <ip:port>
+python installer/install.py stage2a
 ```
 Next Reboot again to apply the changes:
 ```
-adb -s <ip:port> reboot
+adb reboot
 ```
 
 **11. Start CoreELEC**
@@ -145,7 +144,7 @@ You can also set this while installing by adding `--default coreelec` to the Ste
 **If switching stops working after a CoreELEC update**
 CoreELEC updates repair the dual-boot setup on their own. If a switch ever stops working right after one, run from the PC:
 ```
-python installer/reassert_env_gate.py --serial <ip:port> --boot-ce 1
+python installer/reassert_env_gate.py --boot-ce 1
 ```
 
 ---
@@ -154,8 +153,8 @@ python installer/reassert_env_gate.py --serial <ip:port> --boot-ce 1
 
 From the Android side, with the stage-0 backups present:
 ```
-python installer/restore_stock_gpt.py --serial <ip:port> --yes          # stock GPT + userdata wipe
-python installer/restore_env_misc_factory.py --serial <ip:port> --yes   # env + misc back to factory
+python installer/restore_stock_gpt.py --yes          # stock GPT + userdata wipe
+python installer/restore_env_misc_factory.py --yes   # env + misc back to factory
 ```
 Then remove the Magisk modules (`blockgms_sysupdate`, `blockota_twilight`, `toolbox_export`) to
 restore OTA/exports.

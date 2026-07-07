@@ -12,7 +12,7 @@ Files written to /flash (= CE_FLASH, which the CE update does NOT erase):
                     dd's this image back -> gate restored + auto-enters the new CE.
   user-update.sh    latest hook (also baked into ce_flash.img; refreshed here)
 
-  python deploy_flash_recovery.py --serial <ip:port>
+  python deploy_flash_recovery.py --serial <serial>
 """
 import argparse, os, subprocess, sys
 
@@ -37,7 +37,7 @@ def push(serial, local, remote):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--default", choices=["coreelec", "android"], default=None,
                     help="boot default to bake into env_dualboot.bin (default: keep current)")
     a = ap.parse_args()

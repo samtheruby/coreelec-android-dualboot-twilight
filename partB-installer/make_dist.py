@@ -167,10 +167,9 @@ Self-contained. Needs only **Python 3** + **adb** and a **stock, rooted, unlocke
 
 Prep on the stick: Developer options + ADB on, bootloader unlocked (most sticks were
 never unlocked -- see stage_unlock below). Connect by **USB** (plug in, authorize the
-prompt) **or wireless** (`adb connect <ip>:<port>`); confirm `adb devices`. Every
-`--serial` below takes either a **USB id or `ip:port`** -- or omit `--serial` entirely to
-auto-pick when just one device is attached. (USB is typically faster + more stable for the
-big stage-1 image streams.)
+prompt); confirm `adb devices`. With just one device attached you can omit `--serial`
+and the tool auto-picks it; with several attached, pass `--serial <serial>` (the USB id
+from `adb devices`).
 
 ## Stage_unlock -- unlock the bootloader (run before stage_magisk, DESTRUCTIVE)
 `stage_magisk` flashes via fastboot, which a **locked** bootloader refuses. Most sticks
@@ -179,7 +178,7 @@ were never unlocked, so run this first. **Unlocking factory-resets the stick.** 
 
 With **USB connected**, run:
 ```
-python installer/install.py stage_unlock --serial <ip:port> --yes
+python installer/install.py stage_unlock --yes
 ```
 Reboots into the bootloader (a Mi-logo splash appears on the stick), checks the lock state
 with `fastboot getvar unlocked`, and -- if locked -- runs `fastboot flashing unlock` +
@@ -194,7 +193,7 @@ bootloader must be **unlocked** first (see stage_unlock).
 
 With **USB connected** (required for the fastboot flash), run:
 ```
-python installer/install.py stage_magisk --serial <ip:port>
+python installer/install.py stage_magisk
 ```
 The script automatically:
 1. Installs the bundled Magisk APK via adb
@@ -216,14 +215,14 @@ then verify with `adb shell su -c id` → `uid=0`. Skip this entire step if root
 
 ## Stage 0 -- preflight + backups (read-only)
 ```
-python installer/install.py stage0 --serial <ip:port>
+python installer/install.py stage0
 ```
 Checks it is a stock, rooted {DEVICE} and pulls per-region backups to `pulled_backups/`.
 
 ## Stage 1 -- CORE install  (DESTRUCTIVE; ends at first reboot)
 ```
-python installer/install.py stage1 --serial <ip:port> --yes      # omit --yes = dry-run
-adb -s <ip:port> reboot
+python installer/install.py stage1 --yes      # omit --yes = dry-run
+adb reboot
 ```
 Writes GPT + CE_FLASH/CE_STORAGE + kernel/dtb + misc + env; every region is SHA-256
 verified. Then it **arms the bootloader control block** (`misc`: `boot-recovery` +
@@ -240,7 +239,7 @@ run **stage 1b** before stage 2. (The reset also clears the u-boot env gate --
 
 ## Stage 1b -- re-install Magisk APK (after the stage 1 factory reset)
 ```
-python installer/install.py stage1b --serial <ip:port>
+python installer/install.py stage1b
 ```
 The stage 1 factory reset wipes `/data`, which removes the Magisk APK and its
 root-grant database. The active slot's `init_boot` is **still patched** (that partition is untouched),
@@ -253,8 +252,8 @@ prints the stage 2 command and exits.
 
 ## Stage 2 -- apps + modules  (Android side)
 ```
-python installer/install.py stage2 --serial <ip:port>
-adb -s <ip:port> reboot
+python installer/install.py stage2
+adb reboot
 ```
 - **(Re)assert the env boot gate.** Stage 1's reboot factory-resets userdata via
   recovery, which on this SoC also resets the u-boot env to stock -- dropping the gate.
@@ -271,7 +270,7 @@ adb -s <ip:port> reboot
 
 ## Stage 2a -- Xiaomi auto-update block  (OPTIONAL, Xiaomi only)
 ```
-python installer/install.py stage2a --serial <ip:port>
+python installer/install.py stage2a
 ```
 Installs **blockota** (disables the Xiaomi `com.xiaomi.mitv.updateservice` updater).
 
@@ -302,7 +301,7 @@ python installer/deploy_kodi_sources.py  --host <coreelec-ip>
 
 ## verify -- layout/env readiness (read-only, Android)
 ```
-python installer/install.py verify --serial <ip:port>
+python installer/install.py verify
 ```
 
 ## Using it
@@ -310,13 +309,13 @@ python installer/install.py verify --serial <ip:port>
 - Open **Reboot to CoreELEC** -> CoreELEC. A normal reboot returns to Android.
 - After a CoreELEC OS update the dual-boot self-heals (the `/flash/user-update.sh`
   hook re-syncs the kernel/dtb and restores the env gate). If the switcher ever
-  stops working post-update: `python installer/reassert_env_gate.py --serial <ip:port> --boot-ce 1`.
+  stops working post-update: `python installer/reassert_env_gate.py --boot-ce 1`.
 
 ## Boot default -- Android or CoreELEC
 By default a normal reboot boots **Android** (the app enters CoreELEC). To make
 **CoreELEC the default** instead:
 - at install: add `--default coreelec` to stage1, OR
-- on an installed unit (from Android): `python installer/reassert_env_gate.py --serial <ip:port> --default coreelec`
+- on an installed unit (from Android): `python installer/reassert_env_gate.py --default coreelec`
 Then a normal power-on boots CoreELEC, and CoreELEC's built-in **"reboot to
 eMMC/nand"** option boots Android (one-shot; next reboot returns to CoreELEC). If
 CoreELEC ever fails to boot, u-boot automatically falls through to Android -- so

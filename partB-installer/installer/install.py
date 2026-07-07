@@ -32,15 +32,16 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
 The [generic] stage3 pieces (Toolbox addon, Kodi sources) also run standalone on
 any CoreELEC box -- see deploy_toolbox_addon.py / deploy_kodi_sources.py.
 
-Usage:
-  python install.py stage_unlock --serial <ip:port> --yes        # unlock bootloader (wipes device)
-  python install.py stage_magisk --serial <ip:port>              # auto-find init_boot_patched.img
-  python install.py stage_magisk --serial <ip:port> --magisk-img <path>
-  python install.py stage1  --serial <ip:port> --yes
-  python install.py stage2  --serial <ip:port>
-  python install.py stage2a --serial <ip:port>
+Usage (device on USB; with one device attached --serial auto-picks, else add
+--serial <serial>):
+  python install.py stage_unlock --yes        # unlock bootloader (wipes device)
+  python install.py stage_magisk              # auto-find init_boot_patched.img
+  python install.py stage_magisk --magisk-img <path>
+  python install.py stage1  --yes
+  python install.py stage2
+  python install.py stage2a
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
-  python install.py all     --serial <ip:port> --yes      # stage_magisk+stage0+stage1, guides the rest
+  python install.py all     --yes             # stage_magisk+stage0+stage1, guides the rest
 """
 import argparse, os, subprocess, sys
 
@@ -141,7 +142,7 @@ def stage_unlock(a):
         print()
         print("  ATTENTION: unlocking the bootloader ERASES ALL DATA (factory reset).")
         print("  Re-run with --yes to proceed:")
-        print(f"    python install.py stage_unlock --serial {a.serial} --yes")
+        print("    python install.py stage_unlock --yes")
         print("  Leaving the device in fastboot. Reboot manually with: fastboot reboot")
         return 1
 
@@ -170,10 +171,10 @@ def stage_unlock(a):
     print("  Bootloader unlocked. The device factory-reset itself and will boot to")
     print("  Android first-time setup. RE-SETUP FROM SCRATCH:")
     print("    1. Complete Android setup (you can skip Google sign-in)")
-    print("    2. Re-enable Developer options + USB/wireless debugging")
-    print("    3. Re-authorize ADB, reconnect (adb connect <ip:port> if wireless)")
+    print("    2. Re-enable Developer options + USB debugging")
+    print("    3. Re-authorize ADB, then re-plug the USB cable")
     print("  Then run stage_magisk:")
-    print("    python install.py stage_magisk --serial <ip:port>")
+    print("    python install.py stage_magisk")
     return 0
 
 
@@ -308,10 +309,8 @@ def stage_magisk(a):
             return 0
         time.sleep(1)
     print(f"  {ib_part} flashed successfully.")
-    print("  ADB did not reconnect on the same serial within 90 s.")
-    if ":" in a.serial:
-        print("  Device rebooted -- reconnect with: adb connect <ip:port>")
-    print("  Then continue: python install.py stage0 --serial <serial>")
+    print("  ADB did not reconnect within 90 s.")
+    print("  Re-plug the USB cable, then continue: python install.py stage0")
     sys.exit(0)
 
 
@@ -359,7 +358,7 @@ def stage1b(a):
         print(f"  WARNING: could not confirm root ({root_out.strip() or 'no output'}).")
         print("  Check Magisk is set up, then continue -- stage2 will fail if root is missing.")
     print(f"\nstage1b done. Run stage2 now:")
-    print(f"  python install.py stage2 --serial {a.serial}")
+    print("  python install.py stage2")
     return 0
 
 
@@ -372,9 +371,9 @@ def stage1(a):
         print("\nstage1 done. The NEXT reboot enters recovery and reformats userdata")
         print("(factory-reset-like) to the new size, then boots Android. Reboot now,")
         print("let it finish the wipe + Android first-boot setup, re-enable ADB, then:")
-        print(f"  adb -s {a.serial} reboot")
-        print(f"  python install.py stage1b --serial <new ip:port>   # re-install Magisk APK")
-        print(f"  python install.py stage2  --serial <new ip:port>   # after root confirmed")
+        print("  adb reboot")
+        print("  python install.py stage1b   # re-install Magisk APK")
+        print("  python install.py stage2    # after root confirmed")
     return rc
 
 
@@ -458,7 +457,7 @@ def stage3(a):
 def verify(a):
     print("== verify: layout/env readiness (read-only) ==")
     if not a.serial:
-        sys.exit("verify needs --serial <ip:port> (device in Android)")
+        sys.exit("verify needs a device attached over USB (in Android)")
     return run("validate_nondestructive.py", "--serial", a.serial)
 
 
@@ -466,7 +465,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stage", choices=["stage_unlock", "stage_magisk", "stage0", "stage1", "stage1b",
                                       "stage2", "stage2a", "stage3", "verify", "all"])
-    ap.add_argument("--serial", help="adb serial for the Android stages (ip:port or USB id); "
+    ap.add_argument("--serial", help="adb serial for the Android stages (USB device id); "
                     "omit to auto-pick the only attached device")
     ap.add_argument("--host", help="CoreELEC IP (stage3; device booted into CoreELEC)")
     ap.add_argument("--yes", action="store_true", help="perform destructive stage1 writes")
@@ -491,7 +490,7 @@ def main():
     if a.stage == "all":
         print("Running stage_magisk (if image found) + stage0 + stage1.")
         print("After stage1 reboot into Android and re-run:")
-        print("  python install.py stage2 --serial <ip:port>     (then stage2a optional)")
+        print("  python install.py stage2     (then stage2a optional)")
         print("Then boot CoreELEC and:  python install.py stage3 --host <coreelec-ip>")
         if stage_magisk(a) is None:
             print("  (stage_magisk skipped: no init_boot_patched.img found in artifacts/ or bundle root)")

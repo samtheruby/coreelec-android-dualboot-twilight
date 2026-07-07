@@ -11,8 +11,8 @@ Android+CoreELEC internal dual-boot; no Xiaomi specifics.
 Run AFTER the dual-boot install + first Android boot (userdata reformats during
 the install, which would erase the module otherwise). Reboot to activate.
 
-  python install_toolbox_export.py --serial <ip:port>            # install
-  python install_toolbox_export.py --serial <ip:port> --verify    # check (after reboot)
+  python install_toolbox_export.py --serial <serial>            # install
+  python install_toolbox_export.py --serial <serial> --verify    # check (after reboot)
 """
 import argparse, os, subprocess, sys
 
@@ -33,7 +33,7 @@ def su(serial, cmd):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
     import adb_serial

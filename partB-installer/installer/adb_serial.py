@@ -2,12 +2,9 @@
 """
 Resolve the adb device serial for the installer scripts.
 
-`--serial` accepts ANY adb serial -- a wireless `ip:port` OR a USB device id. The
-transport is irrelevant: every script just runs `adb -s <serial> ...`, and
-`adb forward` / push / exec-out all work the same over USB or Wi-Fi. So nothing here
-is wireless-specific. When `--serial` is omitted and exactly one device is attached,
-that one is used (handy for a single USB stick); with none or several, it exits with
-guidance.
+`--serial` takes the USB device id shown by `adb devices`. When `--serial` is
+omitted and exactly one device is attached, that one is used (the common case for a
+single USB stick); with none or several attached, it exits with guidance.
 """
 import subprocess, sys
 
@@ -27,8 +24,8 @@ def list_devices():
 
 
 def resolve(serial):
-    """Return an explicit --serial unchanged (USB id or ip:port). Otherwise auto-pick the
-    sole ready device, or exit with guidance. Works identically for USB and wireless."""
+    """Return an explicit --serial unchanged (USB device id). Otherwise auto-pick the
+    sole ready device, or exit with guidance."""
     if serial:
         return serial
     devs = list_devices()
@@ -39,7 +36,6 @@ def resolve(serial):
     if not ready:
         extra = f"  seen but not ready: {devs}" if devs else ""
         sys.exit("no ready adb device. Plug in USB + enable USB debugging (authorize the "
-                 "on-screen prompt), or `adb connect <ip:port>` for wireless, then retry."
-                 + extra)
+                 "on-screen prompt), then retry." + extra)
     sys.exit("multiple adb devices attached -- pass --serial <one of: "
-             + ", ".join(ready) + "> (USB id or ip:port)")
+             + ", ".join(ready) + "> (USB device id)")

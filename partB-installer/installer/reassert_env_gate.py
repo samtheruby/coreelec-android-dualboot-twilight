@@ -16,8 +16,8 @@ The CE update-hook (user-update.sh) runs in the initramfs where fw_setenv is
 unavailable, so it cannot re-assert the env itself. Run this from Android after a
 CoreELEC update if the switcher stops working.
 
-  python reassert_env_gate.py --serial <ip:port>             # re-gate, keep boot_ce
-  python reassert_env_gate.py --serial <ip:port> --boot-ce 1  # re-gate + boot CE next reboot
+  python reassert_env_gate.py --serial <serial>             # re-gate, keep boot_ce
+  python reassert_env_gate.py --serial <serial> --boot-ce 1  # re-gate + boot CE next reboot
 """
 import argparse, os, subprocess, sys
 
@@ -45,7 +45,7 @@ def getprop(serial, p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--serial", help="adb serial (ip:port or USB id); omit to auto-pick the only device")
+    ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--boot-ce", choices=["0", "1"], default=None)
     ap.add_argument("--default", choices=["coreelec", "android"], default=None,
                     help="which OS a normal reboot boots. Default: keep current direction.")
