@@ -636,11 +636,22 @@ class Ctx:
         return h.hexdigest(), n
 
     def _sha_device(self, dd_if, skip_sectors, nbytes):
-        """Read exactly nbytes starting skip_sectors*512 into dd_if; hash on-device."""
-        count = (nbytes + 511) // 512
-        cmd = (f"dd if={dd_if} bs=512 skip={skip_sectors} count={count} 2>/dev/null "
-               f"| head -c {nbytes} | sha256sum")
-        out, _ = self.su(cmd)
+        """SHA-256 exactly nbytes starting at skip_sectors*512 of dd_if, hashed on-device.
+
+        Whole 512-byte sectors are read straight with bs=512; only a sub-sector tail
+        (nbytes % 512, always < 512) is trimmed with `head -c`. The old code did
+        `dd ... | head -c {nbytes}`, but busybox `head -c` takes a 32-bit byte count,
+        so a region >= 4 GiB (the box's 10 GiB CE_STORAGE) overflowed it: head errored
+        ("head: ..."), sha256sum hashed nothing, and the DEV hash came back as the error
+        string -- a SPURIOUS verify FAIL, and (via _already_written) an idempotent gate
+        that could never see an already-good CE_STORAGE, so it re-streamed every run.
+        Never hand head a value >= 512 now; the stick's <2 GiB carve never hit this."""
+        full, rem = divmod(nbytes, 512)          # whole sectors + sub-sector tail (0..511)
+        read = f"dd if={dd_if} bs=512 skip={skip_sectors} count={full} 2>/dev/null"
+        if rem:
+            read += (f"; dd if={dd_if} bs=512 skip={skip_sectors + full} count=1 2>/dev/null "
+                     f"| head -c {rem}")
+        out, _ = self.su(f"{{ {read}; }} | sha256sum")
         out = out.strip()
         return out.split()[0] if out else ""
 
