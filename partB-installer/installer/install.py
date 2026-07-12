@@ -12,11 +12,13 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
                    fastboot flashing unlock + unlock_critical -> factory reset;
                    device must be RE-SETUP from scratch afterwards.
     stage_magisk  flash Magisk-patched init_boot (active slot) fastboot [Xiaomi]
-                   run BEFORE stage0 -- gives root that stage0 requires.
+                   run BEFORE stage1 -- gives root that stage1 requires.
                    Reboots to bootloader, flashes, reboots back to Android.
-    stage0  preflight + PC-side backups      [Xiaomi]   read-only + pull
     stage1  CORE install -> first reboot     [Xiaomi]   GPT/CE/kernel/dtb/misc/env
                                                          + arm userdata reformat  DESTRUCTIVE
+             without --yes: read-only preflight + write plan (dry-run)
+             with --yes: pulls SHA-256-verified backups to pulled_backups/
+             BEFORE the first write, then installs
     --- reboot: recovery reformats userdata, boots Android, then ---
     stage2  apps + modules                   [mixed]    RebootToCoreELEC APK,
               flash-recovery [Xiaomi], toolbox_export module [generic],
@@ -41,7 +43,7 @@ Usage (device on USB; with one device attached --serial auto-picks, else add
   python install.py stage2
   python install.py stage2a
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
-  python install.py all     --yes             # stage_magisk+stage0+stage1, guides the rest
+  python install.py all     --yes             # stage_magisk+stage1, guides the rest
 """
 import argparse, os, subprocess, sys
 
@@ -344,14 +346,8 @@ def stage_magisk(a):
         time.sleep(1)
     print(f"  {ib_part} flashed successfully.")
     print("  ADB did not reconnect within 90 s.")
-    print("  Re-plug the USB cable, then continue: python install.py stage0")
+    print("  Re-plug the USB cable, then continue: python install.py stage1")
     sys.exit(0)
-
-
-# ---- stage 0: preflight + backups (flash_to_coreelec dry-run does both) -------
-def stage0(a):
-    print("== stage0: preflight + PC-side backups (read-only) ==")
-    return run("flash_to_coreelec.py", "--serial", a.serial, "--dry-run")
 
 
 # ---- stage 1b: re-install Magisk APK after the stage1 factory reset ---------
@@ -497,7 +493,7 @@ def verify(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["stage_unlock", "stage_magisk", "stage0", "stage1", "stage1b",
+    ap.add_argument("stage", choices=["stage_unlock", "stage_magisk", "stage1", "stage1b",
                                       "stage2", "stage2a", "stage3", "verify", "all"])
     ap.add_argument("--serial", help="adb serial for the Android stages (USB device id); "
                     "omit to auto-pick the only attached device")
@@ -517,20 +513,19 @@ def main():
                     help="stage_magisk: fastboot device serial (auto-detected if omitted)")
     a = ap.parse_args()
 
-    if a.stage in {"stage_unlock", "stage_magisk", "stage0", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
+    if a.stage in {"stage_unlock", "stage_magisk", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
         import adb_serial
         a.serial = adb_serial.resolve(a.serial)
 
     if a.stage == "all":
-        print("Running stage_magisk (if image found) + stage0 + stage1.")
+        print("Running stage_magisk (if image found) + stage1.")
         print("After stage1 reboot into Android and re-run:")
         print("  python install.py stage2     (then stage2a optional)")
         print("Then boot CoreELEC and:  python install.py stage3 --host <coreelec-ip>")
         if stage_magisk(a) is None:
             print("  (stage_magisk skipped: no init_boot_patched.img found in artifacts/ or bundle root)")
-        stage0(a)
         sys.exit(stage1(a))
-    sys.exit({"stage_unlock": stage_unlock, "stage_magisk": stage_magisk, "stage0": stage0, "stage1": stage1,
+    sys.exit({"stage_unlock": stage_unlock, "stage_magisk": stage_magisk, "stage1": stage1,
               "stage1b": stage1b, "stage2": stage2, "stage2a": stage2a,
               "stage3": stage3, "verify": verify}[a.stage](a))
 

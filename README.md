@@ -72,13 +72,7 @@ adb shell su -c id
 ```
 Magisk will ask if you want to grant root access, allow it and adb should return `uid=0`.
 
-**5. Back up the device**
-```
-python installer/install.py stage0
-```
-This saves a full backup to a `pulled_backups` folder and checks the device is ready. Do not skip it; the undo steps later need this backup.
-
-**6. Install CoreELEC (this erases your apps and data on the device)**
+**5. Install CoreELEC (this erases your apps and data on the device)**
 First do a test run that runs the pre-flight checks and ensures the device is ready:
 ```
 python installer/install.py stage1
@@ -88,25 +82,25 @@ If it finishes with OK, run the real install and restart:
 python installer/install.py stage1 --yes
 adb reboot
 ```
-On restart the device resizes its storage once and boots back into the Android first-time setup.
+Before writing anything, the real install saves a full backup of the device to a `pulled_backups` folder and verifies it against the device (SHA-256); the undo steps later need this backup, so keep the folder. On restart the device resizes its storage once and boots back into the Android first-time setup.
 
-**7. Set the device up again, then reconnect**
+**6. Set the device up again, then reconnect**
 Go through the initial setup again, turn **USB debugging** back on, and re-plug the USB cable.
 
-**8. Put the Magisk app back**
-Step 6 removed it. Re-install it:
+**7. Put the Magisk app back**
+Step 5 removed it. Re-install it:
 ```
 python installer/install.py stage1b
 ```
 The tool pauses and asks you to open the **Magisk app** on the device, finish its setup, and allow the root-access request. Once root is confirmed, press Enter in the terminal.
 
-**9. Install the switcher app and modules**
+**8. Install the switcher app and modules**
 ```
 python installer/install.py stage2
 ```
 This installs the **Reboot to CoreELEC** app and the pieces that let you switch between the two systems and keep updates from breaking CoreELEC.
 
-**10. Block Xiaomi system updates**
+**9. Block Xiaomi system updates**
 ```
 python installer/install.py stage2a
 ```
@@ -115,10 +109,10 @@ Next Reboot again to apply the changes:
 adb reboot
 ```
 
-**11. Start CoreELEC**
+**10. Start CoreELEC**
 On the device, open the **Reboot to CoreELEC** app and choose to Reboot to enter CoreELEC.
 
-**12. Finish CoreELEC setup**
+**11. Finish CoreELEC setup**
 Once the device is running CoreELEC, make sure to enable **SSH** in CoreELEC's settings if it was not enabled during initial setup and note your IP address (`<coreelec-ip>`). Next enable the JSON-RPC under **Services -> Control** and set the following settings:
 - Set the Password to kodi (all lowercase)
 - Enable Allow Remote Control via HTTP
@@ -145,7 +139,7 @@ To change which one starts by default, see [How To Use](#how-to-use). To undo ev
 **Make CoreELEC start by default instead**
 Out of the box a normal restart goes to Android. To make the device boot straight into CoreELEC, use the CoreELEC toolbox app in CoreELEC to switch the default.
 
-You can also set this while installing by adding `--default coreelec` to the Step 6 command.
+You can also set this while installing by adding `--default coreelec` to the Step 5 command.
 
 **If switching stops working after a CoreELEC update**
 CoreELEC updates repair the dual-boot setup on their own. If a switch ever stops working right after one, run from the PC:
@@ -157,7 +151,7 @@ python installer/reassert_env_gate.py --boot-ce 1
 
 ## Reverse / restore
 
-From the Android side, with the stage-0 backups present:
+From the Android side, with the `pulled_backups` folder from the install present:
 ```
 python installer/restore_stock_gpt.py --yes          # stock GPT + userdata wipe
 python installer/restore_env_misc_factory.py --yes   # env + misc back to factory

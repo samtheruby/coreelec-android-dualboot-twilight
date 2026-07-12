@@ -6,7 +6,8 @@ flash_to_coreelec.py. (GPT/userdata are handled separately by restore_stock_gpt.
 
 Source, in priority order:
   1. pulled_backups/env_pre.bin (64 KiB) + misc_pre.bin (32 KiB) -- THIS unit's own
-     pre-install env+misc, saved by stage0. Reverses a clean install on the same device
+     pre-install env+misc, saved by stage1 before its first write. Reverses a clean
+     install on the same device
      (restores the unit's exact original env, including its own identity).
   2. device_backups/env_p2.bin + misc_p11.bin -- the dev Phase-0 reference dumps (fallback).
 
@@ -20,12 +21,12 @@ by read-back (env: CRC + that the gate is absent; misc: factory A/B bytes).
 import argparse, base64, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage0 dumps
+PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage1 pre-write dumps
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import envtool, build_env, ab_misc, devices  # noqa: E402
 
-# Prefer THIS unit's pre-install env+misc (stage0) over the dev reference dumps.
+# Prefer THIS unit's pre-install env+misc (stage1 pre-write) over the dev reference dumps.
 if os.path.exists(os.path.join(PB, "env_pre.bin")) and os.path.exists(os.path.join(PB, "misc_pre.bin")):
     ENV_SRC = os.path.join(PB, "env_pre.bin")
     MISC_SRC = os.path.join(PB, "misc_pre.bin")

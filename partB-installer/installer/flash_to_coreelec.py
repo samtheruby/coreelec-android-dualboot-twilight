@@ -131,6 +131,7 @@ class Ctx:
         self.pipefail = False   # set in preflight if the device shell supports it
         self.device = None      # set in preflight (devices.identify)
         self.artdir = None      # artifacts/<device.slug>/ -- set in preflight
+        self.backup_dir = os.path.join(HERE, "..", "pulled_backups")
 
     # ---- adb (reads / commands; NOT writes) --------------------------------
     def adb(self, *a, **k):
@@ -438,32 +439,54 @@ class Ctx:
         print("   then: pm disable-user com.xiaomi.mitv.updateservice")
 
     # ---- 4. PC-side backups (before any write) -----------------------------
+    def _part_bytes(self, name):
+        """Byte size of a by-name partition (sizes the whole-partition pulls)."""
+        out, _ = self.su(f"blockdev --getsize64 /dev/block/by-name/{name}")
+        out = out.strip()
+        if not out.isdigit() or int(out) == 0:
+            sys.exit(f"cannot size partition {name!r} for backup ({out or '(no output)'}) "
+                     "-- aborting before writes")
+        return int(out)
+
     def backups_to_pc(self, ce_slot):
-        print("\n-- backups -> pulled_backups/ (before any write) --")
-        dest = os.path.join(HERE, "..", "pulled_backups")
+        """Pull the pre-install backups the restore scripts depend on.
+
+        Every pull is verified end-to-end: the SHA-256 of the bytes that landed
+        on the PC must equal an independent on-device hash of the same region
+        (verify_writes' check, in reverse). A dd failure or a truncated/corrupt
+        adb transfer therefore aborts HERE, before the first write -- not at
+        restore time when the stock data is already gone."""
+        print("\n-- backups -> pulled_backups/ (before any write; SHA-256 verified) --")
+        dest = self.backup_dir
         os.makedirs(dest, exist_ok=True)
 
-        def pull(name, cmd):
-            data = self.su_bytes(cmd + " 2>/dev/null | base64")
+        def pull(name, dd_if, skip, nbytes):
+            sectors = nbytes // 512          # every backup region is sector-aligned
+            data = self.su_bytes(f"dd if={dd_if} bs=512 skip={skip} count={sectors} "
+                                 "2>/dev/null | base64")
             raw = base64.b64decode(b"".join(bytes(data).split()))
+            pc = hashlib.sha256(raw).hexdigest()
+            dev = self._sha_device(dd_if, skip, nbytes)
+            if len(raw) != nbytes or not dev or pc != dev:
+                sys.exit(f"backup pull FAILED for {name}: got {len(raw):,}/{nbytes:,} B, "
+                         f"PC={pc[:16]} DEV={dev[:16] or '(empty)'} -- aborting before writes")
             open(os.path.join(dest, name), "wb").write(raw)
-            print(f"  {name} ({len(raw)} B)")
+            print(f"  {name} ({len(raw):,} B) sha256 ok")
 
-        pull("gpt_primary_pre.bin", f"dd if={DISK} bs=512 count=34")
+        pull("gpt_primary_pre.bin", DISK, 0, 34 * 512)
         # the whole backup-GPT region (array + alt header at the last sector) -- exactly
         # the span the install overwrites, so restore_stock_gpt.py can reverse it cleanly
         # from pulled_backups/. Span is device-specific: stick 4096 (2 MiB), box 33 sectors.
-        pull("gpt_backup_pre.bin",
-             f"dd if={DISK} bs=512 skip={self.device.gpt_backup_lba} count={self.device.gpt_backup_span}")
-        pull("env_pre.bin", "dd if=/dev/block/by-name/env bs=512 count=128")
-        pull("misc_pre.bin", "dd if=/dev/block/by-name/misc bs=512 count=64")
-        pull(f"boot{ce_slot}_pre.bin", f"dd if=/dev/block/by-name/boot{ce_slot}")
-        pull(f"dtbo{ce_slot}_pre.bin", f"dd if=/dev/block/by-name/dtbo{ce_slot}")
-        pull("reserved_pre.bin", "dd if=/dev/block/by-name/reserved")   # identity insurance
-        pull("frp_pre.bin", "dd if=/dev/block/by-name/frp")
+        pull("gpt_backup_pre.bin", DISK,
+             self.device.gpt_backup_lba, self.device.gpt_backup_span * 512)
+        pull("env_pre.bin", "/dev/block/by-name/env", 0, 128 * 512)
+        pull("misc_pre.bin", "/dev/block/by-name/misc", 0, 64 * 512)
+        # whole partitions; "reserved" is the identity insurance (cpu_id, ethaddr)
+        for part in (f"boot{ce_slot}", f"dtbo{ce_slot}", "reserved", "frp"):
+            pull(f"{part}_pre.bin", f"/dev/block/by-name/{part}", 0, self._part_bytes(part))
         if open(os.path.join(dest, "gpt_primary_pre.bin"), "rb").read()[512:520] != b"EFI PART":
             sys.exit("backup sanity failed (GPT) -- aborting before writes")
-        print("  backups verified readable")
+        print("  all backups verified (SHA-256 vs on-device)")
 
     # ---- 5. re-guard + streamed writes -------------------------------------
     def reguard(self):

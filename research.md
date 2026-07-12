@@ -311,7 +311,7 @@ from memory on shutdown, so the script must **stop kodi → edit → start kodi*
 only safe method).
 
 ### 2.17 Installer software architecture
-`installer/install.py` orchestrates two contexts — **Android** (`--serial`, adb: stage0/1/2/2a,
+`installer/install.py` orchestrates two contexts — **Android** (`--serial`, adb: stage1/2/2a,
 verify) and **CoreELEC** (`--host`, ssh: stage3). Each stage is standalone + idempotent. The whole
 chain was validated piecemeal on the working unit (incl. a full destructive reinstall with all 8
 regions SHA-verified, plus a CE-update self-heal). `make_dist.py` produces a self-contained

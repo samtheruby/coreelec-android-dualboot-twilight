@@ -12,7 +12,8 @@ running kernel keeps the old table cached until you REBOOT -- that's expected.
 
 Source of truth, in priority order:
   1. pulled_backups/gpt_primary_pre.bin (34 sectors) + gpt_backup_pre.bin (2 MiB) --
-     THIS unit's own pre-install GPT, saved by stage0. Use this to reverse a clean
+     THIS unit's own pre-install GPT, saved by stage1 before its first write. Use
+     this to reverse a clean
      install on the same device.
   2. device_backups/disk_first2M.bin + disk_last2M.bin (2 MiB each) -- the dev Phase-0
      reference dumps (fallback). Both are verified 32-entry with userdata at the full carve.
@@ -25,7 +26,7 @@ import argparse, base64, os, struct, subprocess, sys, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import devices  # noqa: E402  -- stick/box discrimination registry
-PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage0 dumps
+PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage1 pre-write dumps
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 DEST = os.path.join(HERE, "..", "pulled_backups_prerestore")
 DISK = "/dev/block/mmcblk0"
@@ -33,7 +34,7 @@ SB_WIPE_SECTORS = 8192                  # 4 MiB: clobber fs superblock(s) -> for
 # Geometry (total sectors, GPT backup LBA, stock userdata first/last LBA, backup span)
 # is per-device -- read from the identified device (dev.*) in main().
 
-# Prefer THIS unit's pre-install GPT (stage0) over the dev reference dumps.
+# Prefer THIS unit's pre-install GPT (stage1 pre-write) over the dev reference dumps.
 if os.path.exists(os.path.join(PB, "gpt_primary_pre.bin")) and \
    os.path.exists(os.path.join(PB, "gpt_backup_pre.bin")):
     PRIMARY = os.path.join(PB, "gpt_primary_pre.bin")

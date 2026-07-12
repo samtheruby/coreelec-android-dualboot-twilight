@@ -34,7 +34,7 @@ INSTALLER = ["install.py", "adb_serial.py", "flash_to_coreelec.py", "deploy_flas
              "install_toolbox_export.py", "deploy_toolbox_addon.py",
              "deploy_remote_keymap.py", "deploy_kodi_sources.py",
              "validate_nondestructive.py", "probe_android.py",
-             # reverse/recovery (read pulled_backups/, written by stage0)
+             # reverse/recovery (read pulled_backups/, written by stage1 before its first write)
              "restore_stock_gpt.py", "restore_env_misc_factory.py", "finish_install.py"]
 REMOTE = ["99-xiaomi-remote.hwdb", "xiaomi.xml"]   # payload/remote -> dist/payload/remote
 FLASH = ["user-update.sh"]                          # payload/flash -> dist/flash (update-recovery hook)
