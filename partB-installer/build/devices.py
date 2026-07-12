@@ -18,15 +18,39 @@ PC-side script uses to decide *which* physical device is attached and therefore
 
 DISCRIMINATION (defence in depth)
 ---------------------------------
-`identify()` requires TWO independent facts to agree before it will name a device:
+`identify()` cross-checks these facts before it will name a device:
 
   1. ro.product.model            -- MiTV-AFMU1 (stick) vs MiTV-AFMU0 (box)
-  2. eMMC total sector count     -- /sys/class/block/mmcblk0/size
+  2. ro.product.name             -- adastra   (stick) vs twilight   (box)
+  3. eMMC total sector count     -- /sys/class/block/mmcblk0/size   (ROOT ONLY, see below)
 
 A model string alone is not trusted (it could be spoofed or, in theory, reused);
 the physical eMMC size is a second, hardware-rooted check. `ro.product.device`
 (the shared codename) is cross-checked too, purely as a sanity guard. Any mismatch,
 or an unrecognised model, aborts with NO device selected -- fail closed, never guess.
+
+Note the two `twilight`s are different fields: Android's fingerprint is
+BRAND/PRODUCT/DEVICE, and Xiaomi built both units from ONE board (device=twilight)
+as TWO products (name=adastra for the stick, name=twilight for the box). So the
+shared codename is the *board*; the variant lives in name+model.
+
+WHY THE SIZE CHECK IS ROOT-ONLY
+-------------------------------
+Reading /sys/class/block/mmcblk0/size requires root. AOSP's SELinux policy grants
+the `domain` attribute only `sysfs:dir search` and `sysfs:lnk_file read` -- there is
+no generic `sysfs:file` read -- and `shell.te` adds just a short allowlist
+(sysfs_batteryinfo, sysfs_net, ...) that does not include block devices. So the
+non-root `shell` domain gets `Permission denied`, on BOTH units. (/proc/partitions
+and /proc/device-tree/amlogic-dt-id are denied for the same reason.)
+
+Every caller that runs AFTER root exists passes an su-backed `read_sectors` and gets
+the full hardware-rooted check. `stage_magisk` runs BEFORE root exists -- rooting is
+what it is for -- so it passes `read_sectors=None` and the check is skipped, not
+faked. It compensates by re-verifying the unit from the BOOTLOADER
+(`fastboot getvar partition-size:userdata`, see userdata_size_ok / parse_fastboot_size)
+in the moment before it writes anything. That is a harder fact than sysfs: the
+bootloader reads the real GPT off the eMMC, with no Android and no properties in the
+path.
 
 layout_ready
 ------------
@@ -50,6 +74,7 @@ SEC_PER_MIB = MIB // SECTOR              # 2048
 class Device:
     def __init__(self, slug, model, codename, total_sectors,
                  magisk_img, layout_ready, name, notes="",
+                 product=None,
                  boot_fingerprint=None,
                  carve_start_mib=None, carve_end_mib=None,
                  sizes_mib=None, order=None,
@@ -59,7 +84,8 @@ class Device:
         self.slug = slug                    # short internal id: "stick" | "box"
         self.model = model                  # ro.product.model, the primary key
         self.codename = codename            # ro.product.device (shared: "twilight")
-        self.total_sectors = total_sectors  # mmcblk0 size in 512 B sectors (2nd check)
+        self.product = product              # ro.product.name -- NOT shared: adastra|twilight
+        self.total_sectors = total_sectors  # mmcblk0 size in 512 B sectors (root-only check)
         self.magisk_img = magisk_img        # filename under magisk/ for stage_magisk
         self.layout_ready = layout_ready    # False -> refuse geometry-dependent steps
         self.name = name                    # human label for logs
@@ -99,6 +125,27 @@ class Device:
         (dd count for the backup grab). Stick: 4096 (2 MiB). Box: 33 (array+alt hdr)."""
         return self.total_sectors - self.gpt_backup_lba
 
+    # ---- userdata size: the bootloader-side identity check (stage_magisk) ------
+    # `fastboot getvar partition-size:userdata` makes the BOOTLOADER read the real
+    # GPT, which is the only hardware-rooted fact available before root exists.
+    # A unit is in one of exactly two states, so both are legal:
+    #     stock   -- userdata still spans the whole carve region (pre-install)
+    #     carved  -- userdata shrunk to sizes_mib["userdata"] (post-install re-run)
+    # Stick {4176, 2376} MiB vs box {26540, 14800} MiB: ~6x apart, no overlap.
+    @property
+    def stock_userdata_bytes(self):
+        return (self.stock_ud_last_lba - self.stock_ud_first_lba + 1) * SECTOR
+
+    @property
+    def carved_userdata_bytes(self):
+        return self.sizes_mib["userdata"] * MIB
+
+    def expected_userdata_bytes(self):
+        return (self.stock_userdata_bytes, self.carved_userdata_bytes)
+
+    def userdata_size_ok(self, nbytes):
+        return nbytes in self.expected_userdata_bytes()
+
     def partitions(self):
         """Yield (name, start_mib, end_mib, size_mib) in layout order."""
         cur = self.carve_start_mib
@@ -131,6 +178,7 @@ STICK = Device(
     slug="stick",
     model="MiTV-AFMU1",
     codename="twilight",
+    product="adastra",                      # ro.product.name (confirmed on-device)
     total_sectors=15_269_888,               # 7.28 GiB
     magisk_img="twilight-init_boot-patched.img",
     layout_ready=True,
@@ -147,6 +195,7 @@ BOX = Device(
     slug="box",
     model="MiTV-AFMU0",
     codename="twilight",
+    product="twilight",                     # ro.product.name == the board name here
     total_sectors=61_071_360,               # 29.12 GiB (from recon)
     magisk_img="xiaomi_tv_box_s_3rd_gen_init_boot.img",
     layout_ready=True,                       # geometry implemented + artifacts/box/ built
@@ -171,17 +220,21 @@ def known_models():
     return sorted(BY_MODEL)
 
 
-def identify(getprop, read_sectors, require_layout=False, log=None):
+def identify(getprop, read_sectors=None, require_layout=False, log=None):
     """Return the Device attached, or raise SystemExit (fail closed).
 
     Parameters
     ----------
     getprop : callable(name) -> str
         Reads an Android property (e.g. a wrapper around `adb ... getprop`).
-        Must work WITHOUT root (stage_magisk runs before root exists).
-    read_sectors : callable() -> int
+        Works without root.
+    read_sectors : callable() -> int, or None
         Returns mmcblk0 size in 512 B sectors
-        (e.g. `int(cat /sys/class/block/mmcblk0/size)`). No root required.
+        (e.g. `int(cat /sys/class/block/mmcblk0/size)`). REQUIRES ROOT: SELinux
+        denies the non-root `shell` domain that read (see the module docstring).
+        Pass None from a pre-root caller (stage_magisk) to skip the size check --
+        skipping it is honest; faking it is not. Every root-side caller passes an
+        su-backed reader and gets the full hardware-rooted check.
     require_layout : bool
         If True, also refuse a device whose partition layout is not implemented
         yet (layout_ready=False). Use for any geometry/partitioning step.
@@ -193,6 +246,7 @@ def identify(getprop, read_sectors, require_layout=False, log=None):
     """
     model = (getprop("ro.product.model") or "").strip()
     codename = (getprop("ro.product.device") or "").strip()
+    product = (getprop("ro.product.name") or "").strip()
 
     dev = BY_MODEL.get(model)
     if dev is None:
@@ -206,16 +260,31 @@ def identify(getprop, read_sectors, require_layout=False, log=None):
             f"model {model} ({dev.slug}) expects codename '{dev.codename}' but the "
             f"device reports '{codename}' -- identity mismatch. Abort.")
 
-    # Second, independent, hardware-rooted check: the physical eMMC size.
-    try:
-        sectors = int(read_sectors())
-    except (ValueError, TypeError) as e:
-        raise SystemExit(f"could not read mmcblk0 sector count ({e}) -- refusing to "
-                         "proceed without the size cross-check. Abort.")
-    if sectors != dev.total_sectors:
+    # ro.product.name is the one variant signal besides the model that reads without
+    # root: adastra (stick) vs twilight (box). Enforce it when the unit reports one.
+    if product and product != dev.product:
         raise SystemExit(
-            f"{dev.slug} ({model}) expects {dev.total_sectors:,} eMMC sectors but "
-            f"mmcblk0 reports {sectors:,} -- WRONG DEVICE/GEOMETRY. Abort.")
+            f"model {model} ({dev.slug}) expects product '{dev.product}' but the "
+            f"device reports '{product}' -- identity mismatch. Abort.")
+    if not product and log:
+        log(f"  WARNING: this unit reports no ro.product.name (expected "
+            f"'{dev.product}') -- that cross-check is unavailable.")
+
+    # Independent, hardware-rooted check: the physical eMMC size. Root-only.
+    sectors = None
+    if read_sectors is not None:
+        try:
+            sectors = int(read_sectors())
+        except (ValueError, TypeError, IndexError) as e:
+            raise SystemExit(
+                f"could not read mmcblk0 sector count ({type(e).__name__}: {e}) -- the "
+                f"sysfs read returned nothing. This needs root: SELinux denies the "
+                f"non-root shell domain that read. Refusing to proceed without the size "
+                f"cross-check. Abort.")
+        if sectors != dev.total_sectors:
+            raise SystemExit(
+                f"{dev.slug} ({model}) expects {dev.total_sectors:,} eMMC sectors but "
+                f"mmcblk0 reports {sectors:,} -- WRONG DEVICE/GEOMETRY. Abort.")
 
     if require_layout and not dev.layout_ready:
         raise SystemExit(
@@ -224,18 +293,35 @@ def identify(getprop, read_sectors, require_layout=False, log=None):
             f"geometry-dependent step. {dev.notes}")
 
     if log:
-        log(f"  device: {dev.name} [{dev.slug}] model={model} "
-            f"eMMC={sectors:,} sectors -- identity + geometry match")
+        size = (f"eMMC={sectors:,} sectors -- identity + geometry match"
+                if sectors is not None else
+                "eMMC size not checked (needs root; the bootloader re-verifies "
+                "this unit before any write)")
+        log(f"  device: {dev.name} [{dev.slug}] model={model} product={product} {size}")
     return dev
 
 
 # Convenience: a standard mmcblk0 sector reader given a shell-exec callable that
 # returns text. `su_text(cmd) -> str`. Kept here so callers don't re-implement it.
+# MUST be given an su-backed exec: a non-root shell gets 'Permission denied' on stderr
+# and nothing on stdout. Returns None (not a crash) when the read yields no number, so
+# identify() can fail closed with a message instead of an IndexError traceback.
 def sectors_reader(su_text):
     def _read():
-        out = su_text("cat /sys/class/block/mmcblk0/size").strip()
-        return int(out.split()[0])
+        out = (su_text("cat /sys/class/block/mmcblk0/size") or "").split()
+        return int(out[0]) if out and out[0].isdigit() else None
     return _read
+
+
+# `fastboot getvar partition-size:<part>` prints e.g.
+#     partition-size:userdata: 0x0000000094800000
+# on stdout or stderr depending on the fastboot build. Returns bytes, or None if the
+# variable is absent/unsupported (older bootloader) -- absence is not evidence of a
+# wrong device, so callers must treat None as "unknown", not as "mismatch".
+def parse_fastboot_size(raw):
+    import re as _re
+    m = _re.search(r"0x([0-9a-fA-F]+)", raw or "")
+    return int(m.group(1), 16) if m else None
 
 
 # ---------------------------------------------------------------------------

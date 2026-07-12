@@ -207,12 +207,15 @@ def stage_magisk(a):
     # independent, so require_layout=False (the box can be rooted before its carve
     # layout exists). Runs pre-root -> plain adb shell (no su).
     img = getattr(a, "magisk_img", None) or ""
+    dev = None
     if not img:
         gp = lambda p: adb(a.serial, "shell", "getprop", p,
                            capture_output=True, text=True).stdout.strip()
-        rs = devices.sectors_reader(
-            lambda cmd: adb(a.serial, "shell", cmd, capture_output=True, text=True).stdout)
-        dev = devices.identify(gp, rs, require_layout=False, log=print)
+        # read_sectors=None: the eMMC size CANNOT be read here. This stage runs before
+        # root exists (rooting is what it does), and SELinux denies the non-root shell
+        # domain that sysfs read on both units -- so we don't pretend to check it. The
+        # bootloader re-verifies this unit below, in the moment before the flash.
+        dev = devices.identify(gp, None, require_layout=False, log=print)
         candidates = [os.path.join(magisk_dir, dev.magisk_img),
                       os.path.join(ART, dev.magisk_img),
                       os.path.join(ART, "init_boot_patched.img"),
@@ -282,6 +285,37 @@ def stage_magisk(a):
     if not found:
         sys.exit("fastboot device did not appear within 60 s -- "
                  "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
+
+    # ---- C2. Bootloader-side identity re-check (the hardware fact) ---------------
+    # Everything that picked `img` was an Android property -- a string out of build.prop.
+    # The eMMC size, the one fact that cannot be spoofed, is unreadable pre-root (SELinux).
+    # So ask the BOOTLOADER instead: it reads the real GPT off the eMMC, with no Android
+    # in the path. userdata is ~6x apart between the two units in either state (stock or
+    # already-carved), so a wrong device cannot hide. Last gate before the first write.
+    if dev is not None:
+        r = subprocess.run(fb + ["getvar", "partition-size:userdata"],
+                           capture_output=True, text=True)
+        ud = devices.parse_fastboot_size((r.stdout or "") + (r.stderr or ""))
+        if ud is None:
+            # Variable absent/unsupported. Absence of evidence is not evidence of a wrong
+            # device -- do not block a legitimate install on an older bootloader.
+            print("  WARNING: the bootloader did not report partition-size:userdata, so "
+                  "this unit could not be re-verified against the eMMC. Continuing on the "
+                  "Android-side identity alone.")
+        elif not dev.userdata_size_ok(ud):
+            expect = " or ".join(f"{n // devices.MIB:,} MiB"
+                                 for n in dev.expected_userdata_bytes())
+            subprocess.run(fb + ["reboot"])
+            sys.exit(f"DEVICE MISMATCH -- the bootloader reports a userdata partition of "
+                     f"{ud // devices.MIB:,} MiB, which does not belong to the "
+                     f"{dev.name} (expected {expect}).\n"
+                     f"Android claimed this was a {dev.name}, the hardware disagrees, and "
+                     f"flashing the wrong unit's init_boot can brick it. REFUSING TO FLASH "
+                     f"-- nothing was written. Rebooting to Android.")
+        else:
+            state = ("stock" if ud == dev.stock_userdata_bytes else "carved")
+            print(f"  bootloader check: partition-size:userdata = "
+                  f"{ud // devices.MIB:,} MiB -> {dev.slug} ({state}) -- CONFIRMED")
 
     print(f"  fastboot flash {ib_part} ...")
     r = subprocess.run(fb + ["flash", ib_part, img])
