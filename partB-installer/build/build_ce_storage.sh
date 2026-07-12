@@ -20,7 +20,20 @@ echo "== [$DEV] ce_storage: ${SIZE_MIB} MiB ext4 -> artifacts/$DEV/ =="
 # the gz -- that pair flashes the old image and verifies it against the new hash).
 mkdir -p "$OUT"; rm -f "$IMG" "$IMG.gz"
 truncate -s "${SIZE_MIB}M" "$IMG"
-mke2fs -q -F -t ext4 -m 0 -L CE_STORAGE "$IMG"
+
+# Reproducible ext4: this image is an EMPTY filesystem, so two builds of the same device
+# should be byte-identical -- but a stock mke2fs randomizes three things and ce_storage.img.gz
+# is git-tracked, so it churned in every commit for no reason. All three knobs are needed
+# (measured on e2fsprogs 1.47.0; any one alone still differs):
+#   -U               fixed fs UUID, instead of a random one
+#   -E hash_seed=    fixed dirent hash seed, instead of a random one
+#   E2FSPROGS_FAKE_TIME  pins the superblock mkfs/last-check timestamps
+# The UUID is cosmetic for us -- CoreELEC finds this partition by LABEL (disk=LABEL=CE_STORAGE
+# in the env gate), never by UUID -- so a constant is safe. Two twilight units never share an
+# eMMC, so box and stick reusing one UUID cannot collide.
+CE_STORAGE_UUID=5ce50a6e-0000-4000-8000-000000000001
+export E2FSPROGS_FAKE_TIME=1735689600      # 2025-01-01T00:00:00Z, arbitrary but fixed
+mke2fs -q -F -t ext4 -m 0 -L CE_STORAGE -U "$CE_STORAGE_UUID" -E "hash_seed=$CE_STORAGE_UUID" "$IMG"
 echo "ce_storage.img: $(stat -c %s "$IMG") B ($SIZE_MIB MiB)"
 dumpe2fs -h "$IMG" 2>/dev/null | grep -E "Volume name|Block count|Filesystem features" | sed 's/^/  /'
 echo "  sha256=$(sha256sum "$IMG" | cut -c1-16)"
