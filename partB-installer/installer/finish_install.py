@@ -78,6 +78,10 @@ def main():
         print("\nDRY-RUN only. Re-run with --yes.")
         return
 
+    # OTA disable BEFORE write_all: when the pre-reboot f2fs is still live,
+    # write_all quiesces it by stopping the framework, and `pm` dies with the
+    # framework. Transient either way; stage2's Magisk module is the durable block.
+    g.disable_ota()
     try:
         # skip_sbwipe: do NOT wipe the userdata SB here. Userdata is already the right
         # size by the time you're "finishing", and a wipe that takes triggers a recovery
@@ -85,14 +89,27 @@ def main():
         # idempotent: hash-gate every region so a re-run skips what already matches on
         # eMMC (e.g. a completed CE_FLASH) and only re-streams what actually failed
         # (e.g. a timed-out CE_STORAGE). Safe to run repeatedly until all regions verify.
-        g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True, idempotent=True)
+        quiesced = g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True, idempotent=True)
     finally:
         g.adb("forward", "--remove", f"tcp:{g.port}", capture_output=True)
 
     g.verify_writes(ce_slot)
-    g.disable_ota()
-    print("\n=== completion done ===")
-    print("  normal reboot -> Android (default); 'Reboot to CoreELEC' app -> CoreELEC")
+    if quiesced:
+        # write_all had to quiesce a LIVE old-geometry /data, i.e. this repaired a
+        # stage1 that died BEFORE its reboot -- so the userdata reformat was never
+        # armed (stage1 arms it AFTER verify, which is where it aborted). Without
+        # the BCB, a reboot writes the cached full-size f2fs superblock back over
+        # the stage1 SB wipe and Android comes up on an oversized fs that will
+        # I/O-error once usage crosses the partition end. Arm it now; recovery
+        # reformats userdata on the next boot, exactly like the normal stage1 path.
+        g.arm_factory_reset()
+        print("\n=== completion done (pre-reboot repair) ===")
+        print("  REBOOT NOW (adb reboot). Recovery reformats userdata, then Android.")
+        print("  The reformat wipes Magisk's data + the env gate -- continue the normal")
+        print("  post-stage1 path: install.py stage1b, then stage2.")
+    else:
+        print("\n=== completion done ===")
+        print("  normal reboot -> Android (default); 'Reboot to CoreELEC' app -> CoreELEC")
 
 
 if __name__ == "__main__":

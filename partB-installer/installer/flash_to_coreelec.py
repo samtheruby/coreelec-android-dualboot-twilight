@@ -33,8 +33,9 @@ import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 # Bump on every installer change, and keep it in step with the release tag -- a stamp
 # that lags the tag defeats its own purpose. history: r1=v1.2.3, r2=nc+USB write retry,
 # r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow),
-# v1.2.4=stage_magisk pre-root identity + bootloader flash gate.
-BUILD = "1.2.4 (pre-root identity + bootloader flash gate)"
+# v1.2.4=stage_magisk pre-root identity + bootloader flash gate,
+# v1.2.5=quiesce /data + carve stability probe before the CE streams.
+BUILD = "1.2.5 (quiesce /data + carve stability probe)"
 
 DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
@@ -88,12 +89,15 @@ def main():
         return
     g.backups_to_pc(ce_slot)
     g.reguard()
+    # OTA disable runs BEFORE write_all: the quiesce inside write_all stops the
+    # Android framework, and `pm` needs the framework. Transient either way (the
+    # first-boot reformat erases it); stage2's Magisk module is the durable block.
+    g.disable_ota()
     try:
         g.write_all(ce_slot)
     finally:
         g.adb("forward", "--remove", f"tcp:{g.port}", capture_output=True)
     g.verify_writes(ce_slot)
-    g.disable_ota()
     g.arm_factory_reset()
     print("\n=== install complete ===")
     print("  NEXT REBOOT -> recovery auto-reformats userdata to the new size (factory-reset-")
@@ -474,6 +478,89 @@ class Ctx:
                 or "CE_FLASH" in byname or "CE_STORAGE" in byname:
             sys.exit("re-guard failed (device or state changed) -- aborting before writes")
 
+    # ---- quiesce /data (the carve's live writer) ---------------------------
+    def _kernel_userdata_sectors(self):
+        """Sector count of userdata AS THE RUNNING KERNEL maps it (None if
+        unreadable). After our GPT write the ON-DISK table is the carve, but the
+        kernel keeps its boot-time table for any in-use partition -- so this
+        EXCEEDING the carved size is the tell that a live old-geometry /data
+        (f2fs) still spans the CE regions."""
+        node, _ = self.su("readlink /dev/block/by-name/userdata")
+        node = node.strip().rsplit("/", 1)[-1]
+        if not node:
+            return None
+        out = self.su(f"cat /sys/class/block/{node}/size")[0].split()
+        return int(out[0]) if out and out[0].isdigit() else None
+
+    def quiesce_data(self, s):
+        """Stop whatever can write into the carve while we stream the CE images.
+        Returns True iff a quiesce was needed (old-geometry /data was live).
+
+        The mounted /data is the PRE-carve f2fs: the kernel still maps userdata
+        at its boot-time (stock) size, and f2fs is log-structured -- every write
+        allocates fresh blocks at write pointers (active_logs=6 of them) spread
+        across that whole stale span, i.e. INSIDE CE_FLASH/CE_STORAGE. Its
+        background GC migrates blocks precisely when the box looks idle, so an
+        untouched box keeps scribbling. In the field this corrupted a CE_FLASH
+        that had been streamed correctly (SHA FAIL on read-back; a bad chunk
+        changed hash between two reads of an idle disk).
+
+        `stop` halts the framework -- the userspace write source. adbd and the
+        Magisk su daemon are init services and survive (do NOT umount /data:
+        Magisk lives under /data/adb and losing root mid-install is worse).
+        background_gc=off stops f2fs's own idle-time migration; the syncs flush
+        what is already dirty. The UI dies until reboot -- the install ends in
+        a reboot anyway. Skipped when the kernel's userdata is already carve-
+        sized (post-reformat finish_install re-run): f2fs then physically
+        cannot reach the CE regions, and killing the UI would be pure cost."""
+        kern = self._kernel_userdata_sectors()
+        if kern is not None and kern == s["userdata"][2]:
+            print("  quiesce: skipped -- kernel userdata already carve-sized "
+                  "(f2fs cannot reach the CE regions)")
+            return False
+        why = ("size unreadable -- assuming live" if kern is None
+               else f"{kern:,}s > carved {s['userdata'][2]:,}s")
+        print(f"  QUIESCE /data ({why}): stop framework + f2fs GC off "
+              "(UI dies until the post-install reboot)")
+        self.su("stop")
+        self.su("sync")
+        self.su("mount -o remount,background_gc=off /data")
+        dline = next((ln for ln in self.su("cat /proc/mounts")[0].splitlines()
+                      if " /data " in ln), "")
+        if dline and "background_gc=off" not in dline:
+            print("  WARN: background_gc=off did not take on /data -- framework stop "
+                  "+ the stability probe are the remaining guards")
+        self.su("sync")
+        self._drop_caches()
+        return True
+
+    def _assert_carve_quiet(self, s, windows=6, win_sectors=8192):
+        """Abort if something is still writing inside the carve: hash `windows`
+        4 MiB samples spread across CE_FLASH..CE_STORAGE twice, caches dropped in
+        between, and require both passes identical. Cheap (tens of MiB, seconds)
+        and read-only. A pass does NOT prove the whole span is untouched (a
+        writer can land between samples) -- the post-write SHA verify remains the
+        real gate. This exists to fail BEFORE ~20 minutes of streaming, and to
+        catch it again on the resume path before the gate trusts a hash."""
+        start, end = s["CE_FLASH"][0], s["CE_STORAGE"][1]
+        span = end - start + 1 - win_sectors
+        skips = [start + (span * i) // (windows - 1) for i in range(windows)]
+
+        def sample():
+            self._drop_caches()
+            out, _ = self.su("; ".join(
+                f"dd if={DISK} bs=512 skip={k} count={win_sectors} 2>/dev/null | sha256sum"
+                for k in skips))
+            return [ln.split()[0] for ln in out.strip().splitlines() if ln.strip()]
+
+        first, second = sample(), sample()
+        if len(first) != windows or first != second:
+            sys.exit("carve region is still being written (a sampled window changed "
+                     "between two reads of an idle disk) -- /data is NOT quiet, so a "
+                     "CE stream would be corrupted after it lands. NOT streaming. "
+                     "Investigate with installer/diag_ce_flash.py before retrying.")
+        print(f"  carve quiet: {windows} sampled windows stable across two reads")
+
     def _already_written(self, src_sha, dd_if, skip):
         """True iff the on-eMMC region [skip*512 : +n] already hashes to the source
         blob. Reads off the eMMC (drop_caches first), so it reflects what actually
@@ -539,6 +626,11 @@ class Ctx:
         # CoreELEC filesystems LAST: MUST nc-stream -- they land in the carve by raw
         # offset, so staging them on userdata would be the read-during-overwrite
         # brick race; too big to push anyway. After this, only the SB wipe + sync.
+        # But FIRST kill the carve's live writer: until the reformat reboot, the
+        # mounted f2fs still spans these LBAs and will overwrite a landed stream
+        # (quiesce also protects the idempotent gate's 10 GiB hash reads below).
+        quiesced = self.quiesce_data(s)
+        self._assert_carve_quiet(s)
         ensure("CE_FLASH", lambda: self._sha_image_raw("ce_flash.img"), DISK, s["CE_FLASH"][0],
                lambda: self.write_offset("ce_flash.img", s["CE_FLASH"][0], "CE_FLASH"))
         ensure("CE_STORAGE", lambda: self._sha_image_raw("ce_storage.img"), DISK, s["CE_STORAGE"][0],
@@ -562,6 +654,7 @@ class Ctx:
 
             self._write_retry(wipe_sb, "userdata SB wipe")
             self.su("sync")
+        return quiesced
 
     # ---- verification ------------------------------------------------------
     def _drop_caches(self):
