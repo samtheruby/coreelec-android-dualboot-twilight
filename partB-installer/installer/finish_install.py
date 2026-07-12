@@ -31,11 +31,18 @@ def main():
     ap.add_argument("--serial", help="adb serial (USB device id); omit to auto-pick the only device")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--port", type=int, default=5599)
+    # Must match the stage1 run being finished: build_target_blobs rebuilds the env
+    # from the device, so omitting this silently flipped a --default coreelec install
+    # back to android (caught in the field; masked there only because the pre-reboot
+    # repair path ends in a factory reset that clears env for stage2 to re-gate).
+    ap.add_argument("--default", choices=["android", "coreelec"], default="android",
+                    help="which OS a normal reboot boots -- pass the SAME value the "
+                         "original stage1 used (default: android)")
     a = ap.parse_args()
     import adb_serial
     a.serial = adb_serial.resolve(a.serial)
     dry = not a.yes
-    g = F.Ctx(a.serial, dry, a.port)
+    g = F.Ctx(a.serial, dry, a.port, a.default)
 
     print(f"=== finish install (serial={a.serial} mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
     print(f"    build={F.BUILD}")
