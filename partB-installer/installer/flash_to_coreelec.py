@@ -30,9 +30,11 @@ import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 # PURPOSE: it is compiled into the bytecode, so a stale __pycache__/*.pyc (the classic
 # "I copied the new .py but Python kept the old compiled copy" trap) prints the OLD
 # value -- proving which code actually executed, not just which source sits on disk.
-# Bump on every installer change. history: r1=v1.2.3, r2=nc+USB write retry,
-# r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow).
-BUILD = "1.2.3-r3 (sha-verify>=4GiB + write-retry)"
+# Bump on every installer change, and keep it in step with the release tag -- a stamp
+# that lags the tag defeats its own purpose. history: r1=v1.2.3, r2=nc+USB write retry,
+# r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow),
+# v1.2.4=stage_magisk pre-root identity + bootloader flash gate.
+BUILD = "1.2.4 (pre-root identity + bootloader flash gate)"
 
 DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
