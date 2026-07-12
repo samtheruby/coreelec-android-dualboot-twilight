@@ -27,7 +27,15 @@ rm -f "$IMG" "$IMG.gz"
 
 echo "== create ${SIZE_MIB} MiB image + mkfs.vfat (FAT32, label CE_FLASH) =="
 dd if=/dev/zero of="$IMG" bs=1M count="$SIZE_MIB" status=none
-mkfs.vfat -F 32 -n CE_FLASH "$IMG" >/dev/null
+# -i pins the FAT volume ID, which mkfs.vfat otherwise derives from the clock.
+# NOTE: this does NOT make ce_flash.img byte-reproducible -- mcopy still stamps each
+# directory entry's creation time from the clock, so two builds of the same payload differ
+# by a couple of bytes (measured: 4 bytes, or 2 with SOURCE_DATE_EPOCH set; mtools 4.0.43
+# has no way to pin the rest). Do not use this image's sha256 to decide whether the payload
+# changed -- hash payload/flash/ for that. Unlike ce_storage.img (see build_ce_storage.sh,
+# which IS reproducible) this image is gitignored, so the leftover nondeterminism costs
+# nothing; the fixed volume ID is just one less thing that moves for no reason.
+mkfs.vfat -F 32 -n CE_FLASH -i 43450001 "$IMG" >/dev/null   # 'CE' 00 01
 
 # files that CoreELEC needs to boot internally + our hooks (exclude build cruft:
 # cfgload.orig, fs-resize.log, dtb.xml, and Android media dirs).
@@ -59,10 +67,51 @@ rm -f /tmp/_sys_check
 echo "   stored=$stored calc=$calc  $( [ "$calc" = "$stored" ] && echo MATCH || echo MISMATCH )"
 [ "$calc" = "$stored" ] || { echo "SYSTEM md5 mismatch -- abort"; exit 1; }
 
-echo "== verify: cfgload uses LABEL=CE_STORAGE =="
-mcopy -i "$IMG" "::cfgload" /tmp/_cfg
-if grep -q 'disk=LABEL=CE_STORAGE' /tmp/_cfg; then echo "   OK LABEL=CE_STORAGE"; else echo "   !! cfgload missing LABEL=CE_STORAGE"; fi
-rm -f /tmp/_cfg
+# This used to grep cfgload for `disk=LABEL=CE_STORAGE`. That check was wrong twice over:
+# the internal boot path never executes cfgload (the bootcefromemmc env gate sets bootargs
+# inline and goes straight to `imgread kernel boot_X`), and upstream has since moved
+# cfgload's eMMC branch to `disk=FOLDER=/dev/CE_STORAGE` -- so it warned on a string we
+# don't need, in a file we don't run. Check the files the boot path DOES depend on instead.
+#
+# What actually has to be in this FAT:
+#   SYSTEM     the squashfs the CoreELEC initramfs mounts (boot=LABEL=CE_FLASH). md5 above.
+#   kernel.img + dtb.img
+#              NOT read from here at boot (u-boot pulls those from boot_X/dtbo_X), but
+#              user-update.sh reflashes those partitions FROM THESE FILES after a CoreELEC
+#              OS update. If they are missing or corrupt here, the next OTA silently leaves
+#              the slots stale and the box boots the old kernel against the new SYSTEM.
+#   dovi.ko / resolution.ini / user-update.sh
+#              our additions -- absent from the generic CoreELEC image, so they only exist
+#              here if they were carried over from the previous payload. Easy to lose in a
+#              payload swap; a missing one is silent until Dolby Vision or a reboot breaks.
+echo "== verify: kernel.img md5 survives the FS roundtrip =="
+mcopy -i "$IMG" "::kernel.img" /tmp/_kern_check
+kcalc=$(md5sum /tmp/_kern_check | cut -d' ' -f1)
+kstored=$(cut -d' ' -f1 "$FLASH/kernel.img.md5")
+rm -f /tmp/_kern_check
+echo "   stored=$kstored calc=$kcalc  $( [ "$kcalc" = "$kstored" ] && echo MATCH || echo MISMATCH )"
+[ "$kcalc" = "$kstored" ] || { echo "kernel.img md5 mismatch -- abort"; exit 1; }
+
+echo "== verify: dtb.img is an FDT and fits the 128 KiB dtbo span =="
+mcopy -i "$IMG" "::dtb.img" /tmp/_dtb_check
+dmagic=$(od -A n -t x1 -N 4 /tmp/_dtb_check | tr -d ' \n')
+dsize=$(stat -c %s /tmp/_dtb_check)
+rm -f /tmp/_dtb_check
+[ "$dmagic" = "d00dfeed" ] || { echo "   !! dtb.img magic=$dmagic (not an FDT) -- abort"; exit 1; }
+[ "$dsize" -le 131072 ] || { echo "   !! dtb.img $dsize B > 128 KiB dtbo span -- abort"; exit 1; }
+echo "   OK FDT magic d00dfeed, $dsize B (fits 131072 B span)"
+
+echo "== verify: our additions survived the payload swap =="
+missing=0
+for f in dovi.ko resolution.ini user-update.sh; do
+  if mdir -i "$IMG" "::$f" >/dev/null 2>&1; then
+    echo "   OK $f"
+  else
+    echo "   !! MISSING $f -- not in the generic CoreELEC image; carry it over from the previous payload"
+    missing=1
+  fi
+done
+[ "$missing" -eq 0 ] || { echo "required additions missing from payload -- abort"; exit 1; }
 
 sz=$(stat -c %s "$IMG")
 echo
