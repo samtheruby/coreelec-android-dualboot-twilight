@@ -117,11 +117,20 @@ def main():
         dst = os.path.join(DIST, "artifacts", dev.slug, f + ".gz")
         src_gz = os.path.join(art_dev, f + ".gz")
         src_raw = os.path.join(art_dev, f)
-        if os.path.exists(src_gz):
+        # The gz is derived from the raw (build_ce_{flash,storage}.sh emit both). Reuse it
+        # only if it is at least as new as that raw: a gz left over from a previous CoreELEC
+        # payload would otherwise ship in the bundle and be flashed INSTEAD of the image we
+        # just built -- the installer streams the gz, so the swap is silent. Re-gzip if in
+        # doubt; a couple of minutes beats shipping last month's CoreELEC.
+        have_gz, have_raw = os.path.exists(src_gz), os.path.exists(src_raw)
+        fresh = have_gz and (not have_raw
+                             or os.path.getmtime(src_gz) >= os.path.getmtime(src_raw))
+        if fresh:
             print(f"  copy {dev.slug}/{f}.gz ...", end="", flush=True)
             shutil.copy2(src_gz, dst)
-        elif os.path.exists(src_raw):
-            print(f"  gzip {dev.slug}/{f} ...", end="", flush=True)
+        elif have_raw:
+            why = "stale gz" if have_gz else "no gz"
+            print(f"  gzip {dev.slug}/{f} ({why}) ...", end="", flush=True)
             gzip_to(src_raw, dst)
         else:
             raise SystemExit(f"missing {dev.slug}/{f}[.gz] -- run build/build_all.py --device {dev.slug}")

@@ -19,7 +19,11 @@ SIZE_MIB=$(python3 -c "import sys;sys.path.insert(0,'$HERE');import devices;prin
 
 echo "== [$DEV] ce_flash: ${SIZE_MIB} MiB FAT32 -> artifacts/$DEV/ =="
 mkdir -p "$OUT"
-rm -f "$IMG"
+# $IMG.gz is DERIVED from $IMG (see the gzip step at the end). Drop it BEFORE building
+# the new raw so a crashed build can never leave a gz from the previous CoreELEC payload
+# sitting next to a fresh raw -- the installer streams the gz, so that pair flashes the
+# old build while verifying the new one.
+rm -f "$IMG" "$IMG.gz"
 
 echo "== create ${SIZE_MIB} MiB image + mkfs.vfat (FAT32, label CE_FLASH) =="
 dd if=/dev/zero of="$IMG" bs=1M count="$SIZE_MIB" status=none
@@ -63,3 +67,10 @@ rm -f /tmp/_cfg
 sz=$(stat -c %s "$IMG")
 echo
 echo "ce_flash.img built: $sz B ($((sz/1024/1024)) MiB)  sha256=$(sha256sum "$IMG" | cut -c1-16)"
+
+# ce_flash.img.gz -- the form the installer actually streams (gunzip | dd on-device).
+# Written here, from THIS raw, so raw and gz are always the same generation. Atomic mv:
+# an interrupted gzip leaves the .tmp, never a truncated .gz that still looks flashable.
+echo "== gzip -> ce_flash.img.gz =="
+gzip -6 -c "$IMG" > "$IMG.gz.tmp" && mv -f "$IMG.gz.tmp" "$IMG.gz"
+echo "ce_flash.img.gz:    $(stat -c %s "$IMG.gz") B"

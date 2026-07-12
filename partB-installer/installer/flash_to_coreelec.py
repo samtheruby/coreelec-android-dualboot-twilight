@@ -236,9 +236,19 @@ class Ctx:
             self.adb("forward", "--remove", f"tcp:{port}", capture_output=True)
 
     def _img_payload(self, basename):
-        """Return (path, is_gz) preferring the gz form for big images."""
+        """Return (path, is_gz) for the image we WRITE, preferring the gz form for the
+        big carve images (gunzip streams on-device).
+
+        The gz is DERIVED from the raw, so a raw NEWER than its gz means the build was
+        rerun and the gz is a leftover from the previous CoreELEC payload -- refuse
+        rather than flash the old build. A shipped dist carries the gz only, so this
+        only ever bites in the dev tree, which is exactly where the pair can drift."""
         raw = os.path.join(self.artdir, basename)
         gz = raw + ".gz"
+        if os.path.exists(raw) and os.path.exists(gz) and \
+                os.path.getmtime(gz) < os.path.getmtime(raw):
+            sys.exit(f"{basename}.gz is older than {basename} -- stale artifact; rerun: "
+                     f"python build/build_all.py --device {self.device.slug}")
         if basename in BIG and os.path.exists(gz):
             return gz, True
         if os.path.exists(raw):
@@ -631,15 +641,17 @@ class Ctx:
         return h.hexdigest(), n
 
     def _sha_image_raw(self, basename):
-        """sha256 + length of the RAW image, decompressing the .gz on the fly
-        if only the gz form is shipped (so it matches what landed on disk)."""
-        raw = os.path.join(self.artdir, basename); gz = raw + ".gz"
-        if os.path.exists(raw):
-            return self._sha_file(raw)
-        if not os.path.exists(gz):
-            sys.exit(f"missing {basename}[.gz] for verify")
+        """sha256 + length of the image AS FLASHED (decompressing the .gz on the fly when
+        that is the form we streamed), so it matches what landed on disk.
+
+        Resolves through _img_payload deliberately: this used to prefer the RAW while
+        write_offset() preferred the GZ, so a stale gz next to a fresh raw wrote the OLD
+        image and verified it against the NEW hash."""
+        path, gz = self._img_payload(basename)
+        if not gz:
+            return self._sha_file(path)
         h = hashlib.sha256(); n = 0
-        with gzip.open(gz, "rb") as f:
+        with gzip.open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk); n += len(chunk)
         return h.hexdigest(), n
