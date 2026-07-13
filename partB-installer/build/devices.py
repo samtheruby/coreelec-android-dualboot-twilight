@@ -69,6 +69,12 @@ import sys
 SECTOR = 512
 MIB = 1024 * 1024
 SEC_PER_MIB = MIB // SECTOR              # 2048
+# GPT entry count AFTER the carve. The stock table has 32 slots (Device.stock_num_entries)
+# with no room for CE_FLASH/CE_STORAGE, so build_gpt_layout expands the array to 128. Every
+# side of the install keys off this one number -- the builder writes it, the installer's
+# post-write GPT check requires it, and finish_install uses it to recognise a partly-applied
+# install -- so it lives here rather than as a 128 repeated in three files.
+CARVED_NUM_ENTRIES = 128
 
 
 class Device:

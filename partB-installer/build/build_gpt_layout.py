@@ -30,7 +30,7 @@ import devices
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 SECTOR = L.SECTOR
-NEW_NUM = 128
+NEW_NUM = devices.CARVED_NUM_ENTRIES     # 128 -- the installer verifies this same number
 ARR_BYTES = NEW_NUM * 128               # 16384
 # refdata (per device): refdata/<slug>/stock_gpt_first2m.bin + stock_gpt_last2m.bin
 # output  (per device): artifacts/<slug>/gpt_primary.bin + gpt_backup.bin

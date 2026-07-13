@@ -17,7 +17,7 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
     stage1  CORE install -> first reboot     [Xiaomi]   GPT/CE/kernel/dtb/misc/env
                                                          + arm userdata reformat  DESTRUCTIVE
              without --yes: read-only preflight + write plan (dry-run)
-             with --yes: pulls SHA-256-verified backups to pulled_backups/
+             with --yes: pulls SHA-256-verified backups to pulled_backups/<device>/
              BEFORE the first write, then installs
     --- reboot: recovery reformats userdata, boots Android, then ---
     stage2  apps + modules                   [mixed]    RebootToCoreELEC APK,
@@ -45,7 +45,7 @@ Usage (device on USB; with one device attached --serial auto-picks, else add
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
   python install.py all     --yes             # stage_magisk+stage1, guides the rest
 """
-import argparse, glob, hashlib, os, subprocess, sys, time
+import argparse, glob, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
@@ -53,6 +53,7 @@ MAGISK_DIR = os.path.abspath(os.path.join(HERE, "..", "magisk"))
 PY = sys.executable
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import devices  # noqa: E402  -- stick/box discrimination registry
+import bundle   # noqa: E402  -- SHA256SUMS.txt check for anything we flash
 
 
 def run(script, *args):
@@ -164,43 +165,6 @@ def check_boot_image(path):
     if not 64 * 1024 <= n <= 64 * devices.MIB:
         sys.exit(f"{os.path.basename(path)} is {n:,} B, which is not a plausible init_boot "
                  f"image -- REFUSING to flash it.")
-
-
-def verify_bundled_sha256(path):
-    """Verify `path` against the bundle's SHA256SUMS.txt, when it lists that file.
-
-    make_dist writes SHA256SUMS.txt into every dist bundle, covering magisk/*.img. A bad
-    unzip or a half-copied image is exactly the failure this catches, and 8 MiB of it is
-    about to be written to a boot-critical partition. No-ops (does not fail) when there is
-    no manifest or the file is not in it -- e.g. a source checkout, or a --magisk-img the
-    user patched themselves. That is a real gap, not a hidden one: the manifest can only
-    vouch for what shipped in the bundle.
-    """
-    sums = os.path.abspath(os.path.join(HERE, "..", "SHA256SUMS.txt"))
-    if not os.path.exists(sums):
-        return
-    rel = os.path.relpath(os.path.abspath(path), os.path.dirname(sums)).replace(os.sep, "/")
-    want = None
-    with open(sums, encoding="utf-8", errors="replace") as f:
-        for ln in f:
-            p = ln.split()
-            if len(p) == 2 and p[1].lstrip("*") == rel:   # sha256sum marks binary as '*path'
-                want = p[0].lower()
-                break
-    if want is None:
-        return
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    got = h.hexdigest()
-    if got != want:
-        sys.exit(f"SHA-256 MISMATCH for {rel}\n"
-                 f"  SHA256SUMS.txt says: {want}\n"
-                 f"  the file on disk is: {got}\n"
-                 f"The bundle is corrupt or the image was modified. REFUSING to flash it -- "
-                 f"re-download / re-extract the bundle.")
-    print(f"  sha256 OK ({rel})")
 
 
 # ---- stage_unlock: unlock the bootloader (fastboot flashing unlock) ----------
@@ -437,7 +401,7 @@ def stage_magisk(a):
         print(f"  firmware match OK: {have_fp}")
 
     check_boot_image(img)             # Android boot magic + plausible size
-    verify_bundled_sha256(img)        # vs SHA256SUMS.txt, when the bundle ships one
+    bundle.verify(img)                # vs SHA256SUMS.txt, when the bundle ships one
     print(f"  image: {img}  ({os.path.getsize(img):,} B)")
 
     # ---- D. Which slot ----------------------------------------------------------
@@ -571,25 +535,6 @@ def stage1(a):
         print("  python install.py stage1b   # re-install Magisk APK")
         print("  python install.py stage2    # after root confirmed")
     return rc
-
-
-# ---- ce_slot.conf: drop the slot file on /flash (belt-and-suspenders) ---------
-def write_ce_slot_conf(serial):
-    """Mount CE_FLASH, detect CE slot from the env gate, write /flash/ce_slot.conf.
-    The hook (user-update.sh v2) reads the slot from the env partition directly, so
-    this is a fallback -- but cheap and robust."""
-    gate, _ = su(serial, "dd if=/dev/block/by-name/env bs=512 count=128 2>/dev/null "
-                         "| tr '\\000' '\\n' | grep 'imgread kernel boot_' | head -1")
-    slot = "a" if "boot_a" in gate else ("b" if "boot_b" in gate else "")
-    if not slot:
-        print("  ce_slot.conf: could not detect slot from env -- skipped")
-        return
-    out, rc = su(serial,
-                 "mkdir -p /mnt/ceflash; mount -t vfat -o rw /dev/block/by-name/CE_FLASH /mnt/ceflash 2>/dev/null; "
-                 "mount -o rw,remount /mnt/ceflash 2>/dev/null; "
-                 f"printf 'CE_SLOT={slot}\\n' > /mnt/ceflash/ce_slot.conf && sync && "
-                 "umount /mnt/ceflash 2>/dev/null; echo OK")
-    print(f"  ce_slot.conf: CE_SLOT={slot} {'written' if 'OK' in out else 'FAILED: ' + out}")
 
 
 # ---- stage 2: apps + universal OTA block -------------------------------------

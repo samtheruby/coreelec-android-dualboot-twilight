@@ -43,6 +43,10 @@ def main():
     a.serial = adb_serial.resolve(a.serial)
     dry = not a.yes
     g = F.Ctx(a.serial, dry, a.port, a.default)
+    # This script only ever runs on a unit whose carved GPT is already down (it refuses
+    # anything else, below), i.e. the state where a reboot before the reformat is armed is
+    # dangerous. Say so up front, so any abort in here carries the recovery instructions.
+    g.gpt_written = True
 
     print(f"=== finish install (serial={a.serial} mode={'DRY-RUN' if dry else 'REAL WRITE'}) ===")
     print(f"    build={F.BUILD}")
@@ -56,24 +60,25 @@ def main():
     if "uid=0" not in g.su("id")[0]:
         sys.exit("su root not available")
     g.pipefail = g.su("set -o pipefail 2>/dev/null && echo Y")[0].strip() == "Y"
+    g.check_ce_image_sizes()   # the CE images fit the carve; hashes cached for the gate below
 
-    # sanity: GPT should ALREADY be the 128-entry layout (i.e. partly installed)
+    # sanity: GPT should ALREADY be the carved 128-entry layout (i.e. partly installed)
     g._drop_caches()
     import struct
     gpt = g.su_bytes(f"dd if={F.DISK} bs=512 count=2 2>/dev/null")
     num = struct.unpack_from("<I", gpt, 512 + 80)[0] if gpt[512:520] == b"EFI PART" else -1
-    # The on-disk GPT being 128-entry is the indicator of a partly-applied install.
-    # by-name still shows the cached stock table until a reboot (no CE_* nodes yet),
-    # but env/misc live in unchanged partitions (p2/p11) so writing them works now.
-    if num != 128:
-        sys.exit(f"GPT entries={num} (expected 128) -- this does NOT look "
-                 "partly-installed; use flash_to_coreelec.py instead.")
+    # The on-disk GPT being the carved entry count is the indicator of a partly-applied
+    # install. by-name still shows the cached stock table until a reboot (no CE_* nodes
+    # yet), but env/misc live in unchanged partitions (p2/p11) so writing them works now.
+    if num != devices.CARVED_NUM_ENTRIES:
+        sys.exit(f"GPT entries={num} (expected {devices.CARVED_NUM_ENTRIES}) -- this does "
+                 "NOT look partly-installed; use flash_to_coreelec.py instead.")
 
     active = g.getprop("ro.boot.slot_suffix")
     ce_slot = {"_a": "_b", "_b": "_a"}.get(active)
     if not ce_slot:
         sys.exit(f"bad slot_suffix '{active}'")
-    print(f"  device={dev.slug} root=ok pipefail={g.pipefail} GPT=128 active={active} CE={ce_slot}")
+    print(f"  device={dev.slug} root=ok pipefail={g.pipefail} GPT={num} active={active} CE={ce_slot}")
 
     g.build_target_blobs(ce_slot)   # regenerates env_target.bin + misc_sector.bin from device
     if dry:
@@ -89,16 +94,14 @@ def main():
     # write_all quiesces it by stopping the framework, and `pm` dies with the
     # framework. Transient either way; stage2's Magisk module is the durable block.
     g.disable_ota()
-    try:
-        # skip_sbwipe: do NOT wipe the userdata SB here. Userdata is already the right
-        # size by the time you're "finishing", and a wipe that takes triggers a recovery
-        # factory-reset that resets the env -> wipes the gate we just wrote (re-gate loop).
-        # idempotent: hash-gate every region so a re-run skips what already matches on
-        # eMMC (e.g. a completed CE_FLASH) and only re-streams what actually failed
-        # (e.g. a timed-out CE_STORAGE). Safe to run repeatedly until all regions verify.
-        quiesced = g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True, idempotent=True)
-    finally:
-        g.adb("forward", "--remove", f"tcp:{g.port}", capture_output=True)
+    # skip_sbwipe: do NOT wipe the userdata SB here. Userdata is already the right size by
+    # the time you're "finishing", and a wipe that takes triggers a recovery factory-reset
+    # that resets the env -> wipes the gate we just wrote (a re-gate loop).
+    # idempotent: hash-gate every region so a re-run skips what already matches on eMMC
+    # (e.g. a completed CE_FLASH) and only re-streams what actually failed (e.g. a
+    # timed-out CE_STORAGE). Safe to run repeatedly until all regions verify.
+    # (each nc port is forwarded and removed by _nc_write_once itself.)
+    quiesced = g.write_all(ce_slot, skip_gpt=True, skip_sbwipe=True, idempotent=True)
 
     g.verify_writes(ce_slot)
     if quiesced:

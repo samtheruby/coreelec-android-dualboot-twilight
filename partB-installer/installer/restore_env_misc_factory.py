@@ -4,12 +4,15 @@ Restore the `env` and `misc` partitions to their FACTORY dumps, so a previously
 modified twilight unit becomes a faithful fresh-stock baseline before re-running
 flash_to_coreelec.py. (GPT/userdata are handled separately by restore_stock_gpt.py.)
 
-Source, in priority order:
-  1. pulled_backups/env_pre.bin (64 KiB) + misc_pre.bin (32 KiB) -- THIS unit's own
-     pre-install env+misc, saved by stage1 before its first write. Reverses a clean
-     install on the same device
-     (restores the unit's exact original env, including its own identity).
-  2. device_backups/env_p2.bin + misc_p11.bin -- the dev Phase-0 reference dumps (fallback).
+Source, in priority order (resolved per-device in pick_source(), once the attached
+unit has been identified):
+  1. pulled_backups/<slug>/env_pre.bin (64 KiB) + misc_pre.bin (32 KiB) -- THIS unit's
+     own pre-install env+misc, saved by stage1 before its first write. Reverses a clean
+     install on the same device (restores the unit's exact original env, including its
+     own identity -- which is precisely why it must not be taken from another unit).
+  2. pulled_backups/env_pre.bin + misc_pre.bin -- the same files in the old FLAT layout,
+     from a stage1 run made before backups were namespaced per device.
+  3. device_backups/env_p2.bin + misc_p11.bin -- the dev Phase-0 reference dumps (fallback).
 
 A bad env is not bricking (u-boot falls back to its built-in default and boots
 Android). Each write is size-checked against the on-device partition and verified
@@ -24,17 +27,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PB = os.path.join(HERE, "..", "pulled_backups")            # this unit's stage1 pre-write dumps
 BK = os.path.join(HERE, "..", "..", "device_backups")      # dev Phase-0 dumps (fallback)
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc, devices  # noqa: E402
+import envtool, ab_misc, devices  # noqa: E402
 
-# Prefer THIS unit's pre-install env+misc (stage1 pre-write) over the dev reference dumps.
-if os.path.exists(os.path.join(PB, "env_pre.bin")) and os.path.exists(os.path.join(PB, "misc_pre.bin")):
-    ENV_SRC = os.path.join(PB, "env_pre.bin")
-    MISC_SRC = os.path.join(PB, "misc_pre.bin")
-    SRC_TAG = "pulled_backups (this unit's pre-install env+misc)"
-else:
-    ENV_SRC = os.path.join(BK, "env_p2.bin")
-    MISC_SRC = os.path.join(BK, "misc_p11.bin")
-    SRC_TAG = "device_backups (Phase-0 reference dumps)"
+
+def pick_source(dev):
+    """(env_path, misc_path, tag) for the identified unit.
+
+    Per-device first, then the legacy flat directory, then the dev reference dumps. This
+    CANNOT be decided at import time: env_pre.bin carries the SOURCE unit's identity
+    (serial, MAC, cpu_id), so which one is correct depends on which unit is attached --
+    and that is only known after devices.identify()."""
+    for base, tag in ((os.path.join(PB, dev.slug),
+                       f"pulled_backups/{dev.slug} (this unit's pre-install env+misc)"),
+                      (PB, "pulled_backups (legacy flat layout, pre-install env+misc)")):
+        e, m = os.path.join(base, "env_pre.bin"), os.path.join(base, "misc_pre.bin")
+        if os.path.exists(e) and os.path.exists(m):
+            return e, m, tag
+    return (os.path.join(BK, "env_p2.bin"), os.path.join(BK, "misc_p11.bin"),
+            "device_backups (Phase-0 reference dumps)")
 
 
 def shq(s):
@@ -86,44 +96,50 @@ def main():
     print(f"=== restore env+misc to factory (serial={a.serial} "
           f"mode={'WRITE' if a.yes else 'RECON'}) ===")
 
-    # ---- sources ----
-    for p in (ENV_SRC, MISC_SRC):
+    # ---- device (FIRST: it decides which unit's backups are the right ones) ----
+    # env+misc restore is geometry-independent (this unit's own factory dumps),
+    # so the box is allowed: require_layout=False.
+    print(f"\n-- device --")
+    dev = devices.identify(d.getprop,
+                           devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
+                           require_layout=False, log=print)
+    if "uid=0" not in d.su("id")[0]:
+        sys.exit("su root not available")
+
+    # ---- sources (this unit's) ----
+    env_path, misc_path, tag = pick_source(dev)
+    for p in (env_path, misc_path):
         if not os.path.exists(p):
             sys.exit(f"missing factory dump: {p}")
-    env_src = open(ENV_SRC, "rb").read()
-    misc_src = open(MISC_SRC, "rb").read()
-    print(f"\n-- factory sources [{SRC_TAG}] --")
-    print(f"  {os.path.basename(ENV_SRC):<14} {len(env_src):>10,} B")
-    print(f"  {os.path.basename(MISC_SRC):<14} {len(misc_src):>9,} B")
+    env_src = open(env_path, "rb").read()
+    misc_src = open(misc_path, "rb").read()
+    print(f"\n-- factory sources [{tag}] --")
+    print(f"  {os.path.basename(env_path):<14} {len(env_src):>10,} B")
+    print(f"  {os.path.basename(misc_path):<14} {len(misc_src):>9,} B")
 
     # env source sanity: first 64K is a valid, UN-gated env
     eb = env_src[:envtool.ENV_SIZE]
     if len(eb) < envtool.ENV_SIZE or not envtool.crc_ok(eb)[0]:
-        sys.exit("env_p2.bin first 64K has bad CRC -- refusing")
+        sys.exit(f"{os.path.basename(env_path)} first 64K has bad CRC -- refusing")
     ed = envtool.parse(eb)
     if "boot_ce" in ed or "bootcefromemmc" in ed:
-        sys.exit("env_p2.bin already contains the gate -- not a factory env, refusing")
+        sys.exit(f"{os.path.basename(env_path)} already contains the gate -- not a factory "
+                 f"env, refusing")
     print(f"  env source: crc OK, {len(ed)} keys, no gate (factory)")
 
-    # ---- device ----
-    # env+misc restore is geometry-independent (this unit's own factory dumps),
-    # so the box is allowed: require_layout=False.
-    print(f"\n-- device --")
-    devices.identify(d.getprop,
-                     devices.sectors_reader(lambda cmd: d.su(cmd)[0]),
-                     require_layout=False, log=print)
-    if "uid=0" not in d.su("id")[0]:
-        sys.exit("su root not available")
+    # ---- sizes: the sources must fit this unit's partitions ----
     env_psz = d.part_size("env")
     misc_psz = d.part_size("misc")
-    print(f"  by-name/env  partition = {env_psz:,} B")
-    print(f"  by-name/misc partition = {misc_psz:,} B")
     if env_psz is None or misc_psz is None:
         sys.exit("could not read partition sizes")
+    print(f"  by-name/env  partition = {env_psz:,} B")
+    print(f"  by-name/misc partition = {misc_psz:,} B")
     if len(env_src) > env_psz:
-        sys.exit(f"env_p2.bin ({len(env_src)}) larger than env partition ({env_psz}) -- refusing")
+        sys.exit(f"{os.path.basename(env_path)} ({len(env_src)}) larger than env partition "
+                 f"({env_psz}) -- refusing")
     if len(misc_src) > misc_psz:
-        sys.exit(f"misc_p11.bin ({len(misc_src)}) larger than misc partition ({misc_psz}) -- refusing")
+        sys.exit(f"{os.path.basename(misc_path)} ({len(misc_src)}) larger than misc partition "
+                 f"({misc_psz}) -- refusing")
 
     # ---- current on-device state (for context) ----
     cur_env = d.pull_raw("dd if=/dev/block/by-name/env bs=512 count=128")[:envtool.ENV_SIZE]
@@ -136,15 +152,15 @@ def main():
 
     if not a.yes:
         print(f"\n-- write plan (RECON only) --")
-        print(f"   push env_p2.bin  ; dd of=/dev/block/by-name/env  conv=fsync")
-        print(f"   push misc_p11.bin; dd of=/dev/block/by-name/misc conv=fsync")
+        print(f"   push {os.path.basename(env_path):<14}; dd of=/dev/block/by-name/env  conv=fsync")
+        print(f"   push {os.path.basename(misc_path):<14}; dd of=/dev/block/by-name/misc conv=fsync")
         print("\nRECON only. Re-run with --yes to write.")
         return
 
     # ---- WRITE ----
     print(f"\n-- writing --")
-    d.push(ENV_SRC, "/data/local/tmp/_restore_env.bin")
-    d.push(MISC_SRC, "/data/local/tmp/_restore_misc.bin")
+    d.push(env_path, "/data/local/tmp/_restore_env.bin")
+    d.push(misc_path, "/data/local/tmp/_restore_misc.bin")
     out, rc = d.su(
         "dd if=/data/local/tmp/_restore_env.bin of=/dev/block/by-name/env conv=fsync && "
         "dd if=/data/local/tmp/_restore_misc.bin of=/dev/block/by-name/misc conv=fsync && "

@@ -24,7 +24,7 @@ import argparse, base64, gzip, hashlib, os, socket, subprocess, sys, struct, tim
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
+import envtool, build_env, ab_misc, layout as L, devices, bundle  # noqa: E402
 
 # Build stamp printed in every run header (flash + finish). A hardcoded constant on
 # PURPOSE: it is compiled into the bytecode, so a stale __pycache__/*.pyc (the classic
@@ -34,8 +34,9 @@ import envtool, build_env, ab_misc, layout as L, devices  # noqa: E402
 # that lags the tag defeats its own purpose. history: r1=v1.2.3, r2=nc+USB write retry,
 # r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow),
 # v1.2.4=stage_magisk pre-root identity + bootloader flash gate,
-# v1.2.5=quiesce /data + carve stability probe before the CE streams.
-BUILD = "1.2.5 (quiesce /data + carve stability probe)"
+# v1.2.5=quiesce /data + carve stability probe before the CE streams,
+# v1.2.6=artifact SHA-256 gate + CE image size gate + per-device pulled_backups.
+BUILD = "1.2.6 (artifact SHA gate + CE size gate + per-device backups)"
 
 DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
@@ -52,6 +53,13 @@ class _NcRetry(Exception):
 # Geometry (GPT backup LBA, stock entry count, stock userdata last-LBA) and the
 # per-device artifact directory now come from the IDENTIFIED device (self.device /
 # self.artdir), not module constants -- the stick and box differ on all of them.
+
+# Decompressed sha256 + length of each CE source image, keyed by the payload path we
+# actually stream. Filled ONCE (by check_ce_image_sizes, before the first write) and
+# reused by verify_writes and the idempotent resume gate. Expanding the box's 10 GiB
+# ce_storage.img is minutes of CPU, so hashing it three times per run would be three
+# times the wait for no new information -- the file cannot change mid-run.
+_SRC_SHA = {}
 
 
 def shq(s):
@@ -82,6 +90,7 @@ def main():
     print(f"    build={BUILD}")
     ce_slot = g.preflight()          # identifies the device -> sets g.device / g.artdir
     require_artifacts(g.device)
+    g.check_ce_image_sizes()         # the CE images fit their partitions (before ANY write)
     g.build_target_blobs(ce_slot)
     if dry:
         g.print_plan(ce_slot)
@@ -93,10 +102,7 @@ def main():
     # Android framework, and `pm` needs the framework. Transient either way (the
     # first-boot reformat erases it); stage2's Magisk module is the durable block.
     g.disable_ota()
-    try:
-        g.write_all(ce_slot)
-    finally:
-        g.adb("forward", "--remove", f"tcp:{g.port}", capture_output=True)
+    g.write_all(ce_slot)             # each nc port is forwarded + removed by _nc_write_once
     g.verify_writes(ce_slot)
     g.arm_factory_reset()
     print("\n=== install complete ===")
@@ -110,7 +116,24 @@ def artdir_for(dev):
     return os.path.join(ART, dev.slug)
 
 
+def backup_dir_for(dev):
+    """pulled_backups/<slug>/ -- this unit's pre-install dumps, namespaced by device.
+
+    Flat pulled_backups/ meant installing the box after the stick silently overwrote the
+    stick's ONLY pre-install backups (same filenames), leaving nothing to reverse the
+    stick with. The restore scripts read the same per-device path (and still fall back to
+    a legacy flat directory, so backups pulled before this change stay usable)."""
+    return os.path.join(HERE, "..", "pulled_backups", dev.slug)
+
+
 def require_artifacts(dev):
+    """Every flashable is present, is the right size for THIS device, and -- when the
+    bundle ships a manifest -- is byte-for-byte the file that was built.
+
+    The size checks are the part that works in a source checkout (no manifest): the GPT
+    blobs are pure geometry, so a stale or wrong-device gpt_backup.bin is exactly the
+    kind of thing that would otherwise be dd'd over the backup GPT and only noticed by
+    the read-back afterwards."""
     artdir = artdir_for(dev)
     need = ["gpt_primary.bin", "gpt_backup.bin", "boota.img", "dtboa.img"]
     missing = [n for n in need if not os.path.exists(os.path.join(artdir, n))]
@@ -120,6 +143,29 @@ def require_artifacts(dev):
     if missing:
         sys.exit(f"missing artifacts for {dev.slug}: {missing} (looked in artifacts/{dev.slug}/) "
                  f"-- run: python build/build_all.py --device {dev.slug}")
+
+    # The GPT blobs are dd'd at fixed LBAs, so their length IS their footprint on the
+    # eMMC: gpt_primary covers LBA 0..33, gpt_backup covers gpt_backup_lba..end-of-disk.
+    # A blob built for the other unit has the wrong length here and is refused before it
+    # can run past the end of one of those regions.
+    for name, want in (("gpt_primary.bin", 34 * devices.SECTOR),
+                       ("gpt_backup.bin", dev.gpt_backup_span * devices.SECTOR)):
+        got = os.path.getsize(os.path.join(artdir, name))
+        if got != want:
+            sys.exit(f"{dev.slug}/{name} is {got:,} B but the {dev.name} needs exactly "
+                     f"{want:,} B -- wrong device's artifact, or a stale build. REFUSING "
+                     f"(it is written to a fixed LBA). Rebuild: python build/build_all.py "
+                     f"--device {dev.slug}")
+
+    # vs SHA256SUMS.txt, when this is a dist bundle. The installer's own read-back only
+    # proves the eMMC matches the FILE; this proves the file matches what we shipped.
+    print(f"\n-- artifacts [{dev.slug}] --")
+    paths = [os.path.join(artdir, n) for n in need]
+    paths += [os.path.join(artdir, n + ext) for n in BIG for ext in ("", ".gz")]
+    n_checked = bundle.verify(paths)
+    print(f"  {n_checked} artifact(s) verified against SHA256SUMS.txt" if n_checked else
+          "  (no SHA256SUMS.txt covering these artifacts -- source checkout; the manifest "
+          "can only vouch for a dist bundle)")
 
 
 class Ctx:
@@ -131,11 +177,51 @@ class Ctx:
         self.pipefail = False   # set in preflight if the device shell supports it
         self.device = None      # set in preflight (devices.identify)
         self.artdir = None      # artifacts/<device.slug>/ -- set in preflight
-        self.backup_dir = os.path.join(HERE, "..", "pulled_backups")
+        # True once the carved GPT is on the eMMC. From that moment a failure leaves the
+        # unit in a state a plain reboot must NOT be allowed to meet (see die()), so every
+        # abort past this point carries the recovery instructions. finish_install sets it
+        # up front: it only runs on a unit whose GPT is ALREADY carved.
+        self.gpt_written = False
 
     # ---- adb (reads / commands; NOT writes) --------------------------------
     def adb(self, *a, **k):
         return subprocess.run(["adb", "-s", self.serial, *a], **k)
+
+    # ---- aborting --------------------------------------------------------------
+    def die(self, msg):
+        """Abort, telling the user what state the unit is actually in.
+
+        Before the GPT lands, nothing has been written and a plain exit is the whole
+        story. AFTER it lands, userdata has been shrunk on disk but the reformat that
+        resizes its filesystem is armed LAST (arm_factory_reset) -- so between those two
+        points a reboot brings Android up on an f2fs that still believes it owns the old,
+        larger span. It mounts, and then I/O-errors once usage crosses the new partition
+        end. That is the one state a user must not walk into unwarned, and every abort
+        past the GPT write can produce it.
+        """
+        if self.gpt_written:
+            msg += (
+                "\n\n  ---- IMPORTANT: DO NOT REBOOT THIS DEVICE YET ----\n"
+                "  The carved GPT is already on the eMMC, but the userdata reformat is NOT\n"
+                "  armed. Rebooting now brings Android up on an oversized filesystem that\n"
+                "  will corrupt itself once it fills past the new partition end.\n"
+                "\n"
+                "  Finish the install (hash-gated: it re-writes only what actually failed,\n"
+                "  and arms the reformat):\n"
+                f"    python installer/finish_install.py --serial {self.serial} "
+                f"--default {self.default} --yes\n"
+                "\n"
+                "  Or back the device out to stock instead:\n"
+                f"    python installer/restore_stock_gpt.py --serial {self.serial} --yes\n")
+        sys.exit(msg)
+
+    def _no_dry(self, what):
+        """A dry run must not reach a write. main() returns before write_all, so this can
+        only fire on a wiring bug -- which is exactly when you want it to fire, on the PC,
+        instead of on someone's eMMC."""
+        if self.dry:
+            raise AssertionError(f"BUG: {what} attempted during a DRY-RUN -- no device "
+                                 f"write may be reached on this path")
 
     def _exec_args(self, cmd):
         return ["adb", "-s", self.serial, "exec-out", f"su -c {shq(cmd)}"]
@@ -163,12 +249,13 @@ class Ctx:
         Each attempt gets a fresh port and re-streams from byte 0 (a full overwrite,
         never an append -- the sink dd re-seeks to the region start every time). Only
         transient failures (stall / no-connect) retry; a device rc != 0 fails hard."""
+        self._no_dry(f"nc stream of {label}")
         for attempt in range(1, attempts + 1):
             try:
                 return self._nc_write_once(payload_path, devcmd, label, verify_timeout)
             except _NcRetry as e:
                 if attempt == attempts:
-                    sys.exit(f"{label}: {e} (gave up after {attempts} attempts)")
+                    self.die(f"{label}: {e} (gave up after {attempts} attempts)")
                 print(f"  {label}: {e} -- retrying ({attempt + 1}/{attempts})")
 
     def _nc_write_once(self, payload_path, devcmd, label, verify_timeout=900):
@@ -237,7 +324,7 @@ class Ctx:
                 raise _NcRetry("device write timed out")
             err = proc.stderr.read().decode("utf-8", "replace").strip()
             if rc != 0:
-                sys.exit(f"{label}: device write failed (rc={rc}) {err}")
+                self.die(f"{label}: device write failed (rc={rc}) {err}")
             print(f"  WROTE {label}  ({sent:,} B sent)")
         finally:
             self.adb("forward", "--remove", f"tcp:{port}", capture_output=True)
@@ -285,12 +372,13 @@ class Ctx:
         stall from a device fault) these USB push+dd / b64 writes have no reliable
         transient-vs-deterministic signal, so ANY failure retries; a deterministic
         fault simply exhausts the attempts and exits (a few seconds, not a loop)."""
+        self._no_dry(label)
         for attempt in range(1, attempts + 1):
             ok, detail = attempt_fn()
             if ok:
                 return
             if attempt == attempts:
-                sys.exit(f"{label}: {detail} (gave up after {attempts} attempts)")
+                self.die(f"{label}: {detail} (gave up after {attempts} attempts)")
             print(f"  {label}: {detail} -- retrying ({attempt + 1}/{attempts})")
             time.sleep(pause)
 
@@ -352,7 +440,7 @@ class Ctx:
         vbs = self.getprop("ro.boot.verifiedbootstate")
         print(f"  root=ok verifiedbootstate={vbs}"
               + ("" if vbs == "orange" else "  (WARN: expected orange)"))
-        if not self.su(f"[ -x {NC.split()[0]} ] && echo y")[0].strip() == "y":
+        if self.su(f"[ -x {NC.split()[0]} ] && echo y")[0].strip() != "y":
             sys.exit(f"{NC.split()[0]} not present -- need busybox for nc/gzip")
         # fast-fail on a corrupt gz stream: in plain sh, `a | gzip -dc | dd` returns
         # dd's status (0) even if gzip choked, so a truncated decompress would slip
@@ -384,7 +472,7 @@ class Ctx:
                 ud_last = struct.unpack_from("<Q", e, 40)[0]
         if ud_last != self.device.stock_ud_last_lba:
             sys.exit(f"userdata last_lba={ud_last} != stock {self.device.stock_ud_last_lba}. Abort.")
-        print(f"  GPT stock: 32 entries, userdata ends {ud_last} (full size)")
+        print(f"  GPT stock: {num} entries, userdata ends {ud_last} (full size)")
 
         active = self.getprop("ro.boot.slot_suffix")
         ce_slot = {"_a": "_b", "_b": "_a"}.get(active)
@@ -430,7 +518,7 @@ class Ctx:
             ("userdata-sb wipe", "/dev/zero x8192", f"{DISK} seek={s['userdata'][0]}"),
             ("kernel", "boota.img", f"by-name/boot{ce_slot}"),
             ("dtb", "dtboa.img", f"by-name/dtbo{ce_slot}"),
-            ("A/B misc", "misc_target.bin", "by-name/misc seek=2048"),
+            ("A/B misc", "misc_sector.bin", "by-name/misc seek=2048 B (sector 4)"),
             ("env (LAST)", "env_target.bin", "by-name/env"),
             ("MPT wipe", "/dev/zero x8", "by-name/reserved seek=0 (blank Amlogic MPT)"),
         ]:
@@ -456,8 +544,9 @@ class Ctx:
         (verify_writes' check, in reverse). A dd failure or a truncated/corrupt
         adb transfer therefore aborts HERE, before the first write -- not at
         restore time when the stock data is already gone."""
-        print("\n-- backups -> pulled_backups/ (before any write; SHA-256 verified) --")
-        dest = self.backup_dir
+        dest = backup_dir_for(self.device)
+        print(f"\n-- backups -> pulled_backups/{self.device.slug}/ "
+              f"(before any write; SHA-256 verified) --")
         os.makedirs(dest, exist_ok=True)
 
         def pull(name, dd_if, skip, nbytes):
@@ -497,8 +586,7 @@ class Ctx:
                                  devices.sectors_reader(lambda cmd: self.su(cmd)[0]),
                                  require_layout=True)
         byname = self.su("ls /dev/block/by-name/ 2>/dev/null")[0]
-        if again.slug != getattr(self, "device", again).slug \
-                or "CE_FLASH" in byname or "CE_STORAGE" in byname:
+        if again.slug != self.device.slug or "CE_FLASH" in byname or "CE_STORAGE" in byname:
             sys.exit("re-guard failed (device or state changed) -- aborting before writes")
 
     # ---- quiesce /data (the carve's live writer) ---------------------------
@@ -578,7 +666,7 @@ class Ctx:
 
         first, second = sample(), sample()
         if len(first) != windows or first != second:
-            sys.exit("carve region is still being written (a sampled window changed "
+            self.die("carve region is still being written (a sampled window changed "
                      "between two reads of an idle disk) -- /data is NOT quiet, so a "
                      "CE stream would be corrupted after it lands. NOT streaming. "
                      "Investigate with installer/diag_ce_flash.py before retrying.")
@@ -596,6 +684,7 @@ class Ctx:
         return self._sha_device(dd_if, skip, n) == want
 
     def write_all(self, ce_slot, skip_gpt=False, skip_sbwipe=False, idempotent=False):
+        self._no_dry("write_all")
         s = secs(self.device)
         A = self.artdir
         print("\n-- writes (GPT/kernel/dtb/env: push+dd; CE images: nc; misc: b64) --")
@@ -616,6 +705,10 @@ class Ctx:
         if not skip_gpt:
             ensure("GPT-primary", lambda: self._sha_file(os.path.join(A, "gpt_primary.bin")),
                    DISK, 0, lambda: self.push_dd("gpt_primary.bin", DISK, 0, "GPT-primary"))
+            # From here on userdata is SHRUNK on disk while its filesystem still spans the
+            # old size, and only arm_factory_reset() fixes that. Every abort from now on
+            # must tell the user not to reboot into it -- see die().
+            self.gpt_written = True
             ensure("GPT-backup", lambda: self._sha_file(os.path.join(A, "gpt_backup.bin")),
                    DISK, self.device.gpt_backup_lba,
                    lambda: self.push_dd("gpt_backup.bin", DISK, self.device.gpt_backup_lba, "GPT-backup"))
@@ -688,9 +781,10 @@ class Ctx:
         self._drop_caches()
         gpt = self.su_bytes(f"dd if={DISK} bs=512 count=2 2>/dev/null")
         num = struct.unpack_from("<I", gpt, 512 + 80)[0]
-        if num != 128:
-            sys.exit(f"GPT verify failed: entries={num}")
-        print("  verify GPT: 128 entries OK")
+        if num != devices.CARVED_NUM_ENTRIES:
+            self.die(f"GPT verify failed: entries={num} (expected "
+                     f"{devices.CARVED_NUM_ENTRIES})")
+        print(f"  verify GPT: {num} entries OK")
 
     def _verify_misc(self, ce_slot):
         self._drop_caches()
@@ -698,16 +792,16 @@ class Ctx:
         info = ab_misc.parse(m)
         byte = info["a_byte"] if ce_slot == "_a" else info["b_byte"]
         if not info["crc_ok"] or byte != 0:
-            sys.exit(f"misc verify failed (crc_ok={info['crc_ok']} byte=0x{byte:02x})")
+            self.die(f"misc verify failed (crc_ok={info['crc_ok']} byte=0x{byte:02x})")
         print(f"  verify misc: {ce_slot} unbootable, crc OK")
 
     def _verify_env(self, ce_slot):
         env = self.su_bytes("dd if=/dev/block/by-name/env bs=512 count=128 2>/dev/null")[:envtool.ENV_SIZE]
         if not envtool.crc_ok(env)[0]:
-            sys.exit("env verify failed: CRC invalid")
+            self.die("env verify failed: CRC invalid")
         d = envtool.parse(env)
         if d.get("boot_ce") != "0" or f"imgread kernel boot{ce_slot}" not in d.get("bootcefromemmc", ""):
-            sys.exit("env verify failed: gate/boot_ce wrong")
+            self.die("env verify failed: gate/boot_ce wrong")
         print(f"  verify env: CRC OK, boot_ce=0, gate->boot{ce_slot}")
 
     # ---- Amlogic MPT (kernel-visible partition table) ----------------------
@@ -745,7 +839,7 @@ class Ctx:
         self._drop_caches()
         magic = self.su_bytes("dd if=/dev/block/by-name/reserved bs=4 count=1 2>/dev/null")[:4]
         if magic == b"MPT\x00":
-            sys.exit("MPT verify failed: 'MPT' magic still present in reserved -- "
+            self.die("MPT verify failed: 'MPT' magic still present in reserved -- "
                      "CoreELEC kernel would not see CE_FLASH")
         print("  verify MPT: blanked (kernel uses GPT)")
 
@@ -760,19 +854,62 @@ class Ctx:
 
     def _sha_image_raw(self, basename):
         """sha256 + length of the image AS FLASHED (decompressing the .gz on the fly when
-        that is the form we streamed), so it matches what landed on disk.
+        that is the form we streamed), so it matches what landed on disk. Memoized in
+        _SRC_SHA by payload path -- check_ce_image_sizes, the idempotent resume gate and
+        verify_writes all want the same number, and expanding 10 GiB is not free.
 
         Resolves through _img_payload deliberately: this used to prefer the RAW while
         write_offset() preferred the GZ, so a stale gz next to a fresh raw wrote the OLD
         image and verified it against the NEW hash."""
         path, gz = self._img_payload(basename)
-        if not gz:
-            return self._sha_file(path)
-        h = hashlib.sha256(); n = 0
-        with gzip.open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk); n += len(chunk)
-        return h.hexdigest(), n
+        if path in _SRC_SHA:
+            return _SRC_SHA[path]
+        if gz:
+            h = hashlib.sha256(); n = 0
+            with gzip.open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk); n += len(chunk)
+            res = (h.hexdigest(), n)
+        else:
+            res = self._sha_file(path)
+        _SRC_SHA[path] = res
+        return res
+
+    def check_ce_image_sizes(self):
+        """Refuse a CE image that does not fit its carved partition -- BEFORE any write.
+
+        write_offset streams into `dd of=/dev/block/mmcblk0 seek=<start>` with no count,
+        because a count= on the device side is not safe here: busybox dd counts a short
+        read from the gzip pipe as a whole block, so bounding it there would silently
+        TRUNCATE a perfectly good image. The bound therefore has to be checked on the PC,
+        against the length the image actually decompresses to. Without it an oversized
+        ce_storage.img runs straight off the end of CE_STORAGE -- which on the stick is
+        the sector immediately before the backup GPT.
+
+        The hashes computed here are cached, so verify_writes reuses them and this costs
+        no extra CPU over the run; it only moves the work to before the first write, which
+        is the entire point of a preflight."""
+        print("\n-- CE image size gate (must fit the carve; hashes cached for verify) --")
+        s = secs(self.device)
+        for basename, part in (("ce_flash.img", "CE_FLASH"), ("ce_storage.img", "CE_STORAGE")):
+            path, _ = self._img_payload(basename)
+            print(f"  {os.path.basename(path)}: expanding to hash+size ...", end="", flush=True)
+            sha, n = self._sha_image_raw(basename)
+            cap = s[part][2] * devices.SECTOR          # partition sector count -> bytes
+            print(f" {n:,} B  sha256={sha[:16]}")
+            if n > cap:
+                sys.exit(f"\n{basename} decompresses to {n:,} B but {part} is only "
+                         f"{cap:,} B on the {self.device.name}.\n"
+                         f"Streaming it would write {n - cap:,} B PAST the end of {part}, "
+                         f"over whatever follows it on the eMMC. REFUSING -- nothing has "
+                         f"been written.\nRebuild the artifacts for this unit: "
+                         f"python build/build_all.py --device {self.device.slug}")
+            if n < cap:
+                # Legal (the filesystem simply does not span the whole partition) but it
+                # is never what a correct build produces -- both CE images are sized from
+                # devices.py -- so say it out loud rather than let it pass in silence.
+                print(f"    NOTE: {n:,} B image in a {cap:,} B partition "
+                      f"({cap - n:,} B of the partition left untouched)")
 
     def _sha_device(self, dd_if, skip_sectors, nbytes):
         """SHA-256 exactly nbytes starting at skip_sectors*512 of dd_if, hashed on-device.
@@ -819,8 +956,8 @@ class Ctx:
             tail = "" if ok else f"  PC={lh[:16]} DEV={dh[:16] or '(empty)'}"
             print(f"  {'OK  ' if ok else 'FAIL'} {label:<11} {n:>12,} B  {dh[:16]}{tail}")
         if not allok:
-            sys.exit("SHA-256 verification FAILED -- a written region does not match. "
-                     "Do NOT trust this install; investigate before rebooting.")
+            self.die("SHA-256 verification FAILED -- a written region does not match its "
+                     "source. Do NOT trust this install.")
         print("  all regions byte-identical to source (SHA-256).")
 
     # ---- 6. OTA ------------------------------------------------------------
@@ -865,7 +1002,8 @@ class Ctx:
         self.write_sector_b64(path, "/dev/block/by-name/misc", 0)
         chk = self.su_bytes("dd if=/dev/block/by-name/misc bs=512 count=1 2>/dev/null")[:13]
         if chk != b"boot-recovery":
-            sys.exit("BCB arm failed: 'boot-recovery' not read back -- userdata will NOT reformat")
+            self.die("BCB arm failed: 'boot-recovery' not read back -- userdata will NOT "
+                     "reformat on the next boot")
         print("  BCB set: next reboot -> recovery reformats userdata to the new size, then Android")
 
 

@@ -10,12 +10,15 @@ system or partition data is moved; the GPT region is not mounted, so writing it
 while userdata is mounted is safe (no overlap / no read-during-overwrite). The
 running kernel keeps the old table cached until you REBOOT -- that's expected.
 
-Source of truth, in priority order:
-  1. pulled_backups/gpt_primary_pre.bin (34 sectors) + gpt_backup_pre.bin (2 MiB) --
+Source of truth, in priority order (resolved per-device in pick_source(), once the
+attached unit has been identified):
+  1. pulled_backups/<slug>/gpt_primary_pre.bin (34 sectors) + gpt_backup_pre.bin --
      THIS unit's own pre-install GPT, saved by stage1 before its first write. Use
-     this to reverse a clean
-     install on the same device.
-  2. device_backups/disk_first2M.bin + disk_last2M.bin (2 MiB each) -- the dev Phase-0
+     this to reverse a clean install on the same device.
+  2. pulled_backups/gpt_*_pre.bin -- the same files in the old FLAT layout, from a
+     stage1 run made before backups were namespaced per device. Still honoured;
+     verify_stock_files() checks them against THIS device's geometry either way.
+  3. device_backups/disk_first2M.bin + disk_last2M.bin (2 MiB each) -- the dev Phase-0
      reference dumps (fallback). Both are verified 32-entry with userdata at the full carve.
 
   python restore_stock_gpt.py --serial <serial>          # recon only (no writes)
@@ -34,16 +37,21 @@ SB_WIPE_SECTORS = 8192                  # 4 MiB: clobber fs superblock(s) -> for
 # Geometry (total sectors, GPT backup LBA, stock userdata first/last LBA, backup span)
 # is per-device -- read from the identified device (dev.*) in main().
 
-# Prefer THIS unit's pre-install GPT (stage1 pre-write) over the dev reference dumps.
-if os.path.exists(os.path.join(PB, "gpt_primary_pre.bin")) and \
-   os.path.exists(os.path.join(PB, "gpt_backup_pre.bin")):
-    PRIMARY = os.path.join(PB, "gpt_primary_pre.bin")
-    BACKUP = os.path.join(PB, "gpt_backup_pre.bin")
-    SRC_TAG = "pulled_backups (this unit's pre-install GPT)"
-else:
-    PRIMARY = os.path.join(BK, "disk_first2M.bin")
-    BACKUP = os.path.join(BK, "disk_last2M.bin")
-    SRC_TAG = "device_backups (Phase-0 reference dumps)"
+
+def pick_source(dev):
+    """(primary_path, backup_path, tag) for the identified unit.
+
+    Per-device first, then the legacy flat directory, then the dev reference dumps. This
+    CANNOT be decided at import time any more: which backups are the right ones depends on
+    which unit is attached, and that is only known after devices.identify()."""
+    for base, tag in ((os.path.join(PB, dev.slug), f"pulled_backups/{dev.slug} "
+                                                   f"(this unit's pre-install GPT)"),
+                      (PB, "pulled_backups (legacy flat layout, pre-install GPT)")):
+        p, b = os.path.join(base, "gpt_primary_pre.bin"), os.path.join(base, "gpt_backup_pre.bin")
+        if os.path.exists(p) and os.path.exists(b):
+            return p, b, tag
+    return (os.path.join(BK, "disk_first2M.bin"), os.path.join(BK, "disk_last2M.bin"),
+            "device_backups (Phase-0 reference dumps)")
 
 
 def shq(s):
@@ -103,12 +111,12 @@ def hdr_crc_ok(buf, off):
     return (zlib.crc32(h) & 0xffffffff) == stored
 
 
-def verify_stock_files(dev):
-    for p in (PRIMARY, BACKUP):
+def verify_stock_files(dev, primary, backup, tag):
+    for p in (primary, backup):
         if not os.path.exists(p):
             sys.exit(f"missing stock backup: {p}")
-    f = open(PRIMARY, "rb").read()
-    b = open(BACKUP, "rb").read()
+    f = open(primary, "rb").read()
+    b = open(backup, "rb").read()
     # primary: a 34-sector GPT grab (pulled_backups) or a 2 MiB disk dump (device_backups)
     if len(f) not in (34 * 512, 2 * 1024 * 1024):
         sys.exit(f"primary source is {len(f)} B (want 17408 or 2 MiB) -- refusing")
@@ -125,10 +133,11 @@ def verify_stock_files(dev):
         sys.exit("stock primary header CRC bad -- refusing")
     ud = next((ll for nm, fl, ll in parts if nm == "userdata"), None)
     if ud != dev.stock_ud_last_lba:
-        sys.exit(f"stock userdata last_lba={ud} != {dev.stock_ud_last_lba} ({dev.slug}) -- refusing")
+        sys.exit(f"stock userdata last_lba={ud} != {dev.stock_ud_last_lba} ({dev.slug}) -- "
+                 f"these backups are NOT this unit's (wrong device). Refusing.")
     if b.rfind(b"EFI PART") < 0:
         sys.exit("stock backup has no EFI PART header -- refusing")
-    print(f"  stock source [{SRC_TAG}] OK: primary {len(f)} B (32 entries, userdata->{ud}), "
+    print(f"  stock source [{tag}] OK: primary {len(f)} B (32 entries, userdata->{ud}), "
           f"backup {len(b)} B (alt header present)")
 
 
@@ -156,9 +165,10 @@ def main():
     if "uid=0" not in d.su("id")[0]:
         sys.exit("su root not available")
 
-    # ---- stock source (validated against this device's geometry) ----
+    # ---- stock source (picked for THIS unit, validated against its geometry) ----
     print("\n-- stock backup source --")
-    verify_stock_files(dev)
+    primary, backup, tag = pick_source(dev)
+    verify_stock_files(dev, primary, backup, tag)
 
     # ---- read current GPT ----
     print("\n-- current on-device GPT --")
@@ -189,9 +199,9 @@ def main():
 
     if not a.yes:
         print("\n-- write plan (RECON only; no writes performed) --")
-        print(f"   push {os.path.basename(PRIMARY)} -> /data/local/tmp ; "
+        print(f"   push {os.path.basename(primary)} -> /data/local/tmp ; "
               f"dd of={DISK} bs=512 count=34 seek=0 conv=fsync     (primary GPT)")
-        print(f"   push {os.path.basename(BACKUP)}  -> /data/local/tmp ; "
+        print(f"   push {os.path.basename(backup)}  -> /data/local/tmp ; "
               f"dd of={DISK} bs=512 seek={dev.gpt_backup_lba} conv=fsync   (backup GPT)")
         print(f"   dd if=/dev/zero of={DISK} bs=512 seek={dev.stock_ud_first_lba} "
               f"count={SB_WIPE_SECTORS} conv=fsync   (wipe userdata superblock -> clean reformat)")
@@ -201,8 +211,8 @@ def main():
 
     # ---- WRITE stock GPT ----
     print("\n-- writing stock GPT --")
-    d.push(PRIMARY, "/data/local/tmp/_restore_gpt_p.bin")
-    d.push(BACKUP, "/data/local/tmp/_restore_gpt_b.bin")
+    d.push(primary, "/data/local/tmp/_restore_gpt_p.bin")
+    d.push(backup, "/data/local/tmp/_restore_gpt_b.bin")
     print("  pushed stock dumps to /data/local/tmp")
 
     wipe = "" if a.no_sbwipe else (
