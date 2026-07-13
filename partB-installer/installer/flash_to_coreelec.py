@@ -187,6 +187,11 @@ class Ctx:
         # abort past this point carries the recovery instructions. finish_install sets it
         # up front: it only runs on a unit whose GPT is ALREADY carved.
         self.gpt_written = False
+        # Where backups_to_pc() writes. None -> backup_dir_for(self.device), i.e. the real
+        # per-device pulled_backups/<slug>/. tests/test_backups.py overrides it with a temp
+        # directory -- without this seam that test silently wrote its fixtures into the REAL
+        # backup directory, where restore_stock_gpt.py would later have found them.
+        self.backup_dir = None
 
     # ---- adb (reads / commands; NOT writes) --------------------------------
     def adb(self, *a, **k):
@@ -549,8 +554,8 @@ class Ctx:
         (verify_writes' check, in reverse). A dd failure or a truncated/corrupt
         adb transfer therefore aborts HERE, before the first write -- not at
         restore time when the stock data is already gone."""
-        dest = backup_dir_for(self.device)
-        print(f"\n-- backups -> pulled_backups/{self.device.slug}/ "
+        dest = self.backup_dir or backup_dir_for(self.device)
+        print(f"\n-- backups -> {os.path.relpath(dest, os.path.join(HERE, '..'))} "
               f"(before any write; SHA-256 verified) --")
         os.makedirs(dest, exist_ok=True)
 
@@ -902,19 +907,27 @@ class Ctx:
             sha, n = self._sha_image_raw(basename)
             cap = s[part][2] * devices.SECTOR          # partition sector count -> bytes
             print(f" {n:,} B  sha256={sha[:16]}")
+            if n == cap:
+                continue
+            # Both CE images are generated to EXACTLY their partition size (build_ce_flash.sh
+            # dds SIZE_MIB from devices.py; build_ce_storage.sh truncates to it), so a correct
+            # image is always exactly `cap`. Any other size means this image was not built for
+            # this unit -- which is the whole failure we are trying to catch.
             if n > cap:
-                sys.exit(f"\n{basename} decompresses to {n:,} B but {part} is only "
-                         f"{cap:,} B on the {self.device.name}.\n"
-                         f"Streaming it would write {n - cap:,} B PAST the end of {part}, "
-                         f"over whatever follows it on the eMMC. REFUSING -- nothing has "
-                         f"been written.\nRebuild the artifacts for this unit: "
-                         f"python build/build_all.py --device {self.device.slug}")
-            if n < cap:
-                # Legal (the filesystem simply does not span the whole partition) but it
-                # is never what a correct build produces -- both CE images are sized from
-                # devices.py -- so say it out loud rather than let it pass in silence.
-                print(f"    NOTE: {n:,} B image in a {cap:,} B partition "
-                      f"({cap - n:,} B of the partition left untouched)")
+                why = (f"Streaming it would write {n - cap:,} B PAST the end of {part}, over "
+                       f"whatever follows it on the eMMC.")
+            else:
+                # Caught by the box-safety audit: the stick's 600 MiB ce_flash.img dropped into
+                # artifacts/box/ is SMALLER than the box's 1500 MiB CE_FLASH, so a "too big"
+                # test alone waved it through and the box would have been given stick-sized
+                # filesystems -- 900 MiB of CE_FLASH and 9 GiB of CE_STORAGE silently unused.
+                why = (f"It is {cap - n:,} B SHORT of {part}. A correct image spans its whole "
+                       f"partition, so this one was almost certainly built for the OTHER unit "
+                       f"(or by a stale build).")
+            sys.exit(f"\n{basename} decompresses to {n:,} B, but {part} on the "
+                     f"{self.device.name} is {cap:,} B.\n{why}\n"
+                     f"REFUSING -- nothing has been written. Rebuild this unit's artifacts:\n"
+                     f"  python build/build_all.py --device {self.device.slug}")
 
     def _sha_device(self, dd_if, skip_sectors, nbytes):
         """SHA-256 exactly nbytes starting at skip_sectors*512 of dd_if, hashed on-device.

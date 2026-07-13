@@ -82,7 +82,22 @@ def read_env():
 
 
 def write_env(b):
+    """Write the env and PROVE it landed. Raises IOError if it did not.
+
+    This writes the partition u-boot reads to decide what boots, so it does not get to
+    assume. The Android switcher (EnvFlip.kt) has always read the env back and re-checked
+    both its CRC and the value it set before rebooting; the CoreELEC side wrote and hoped.
+    Same partition, same consequence -- so the same check.
+    """
+    if len(b) != ENV_SIZE:
+        raise ValueError(f"refusing to write a {len(b)} B env (must be exactly {ENV_SIZE})")
+    if not crc_ok(b):
+        raise ValueError("refusing to write an env whose own CRC does not verify")
     with open(ENV_DEV, "r+b") as f:
         f.write(b)
         f.flush()
         os.fsync(f.fileno())
+    back = read_env()
+    if back != b:
+        raise IOError("env read-back does not match what was written -- the env partition "
+                      "may be in a bad state; do NOT reboot before checking it")

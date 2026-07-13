@@ -54,10 +54,16 @@ def is_input_remote(dev):
 
 
 def gen_info(name, pid, penc):
-    irk = pid[:32].upper()
-    ltk = penc[:32].upper()
-    rand = int(_rev(penc[32:48]), 16)
-    ediv = int(_rev(penc[48:52]), 16)
+    # The export is a file we parse off a FAT partition; a truncated or non-hex key would
+    # otherwise raise ValueError out of int(...,16) and surface as a Kodi crash dialog
+    # rather than "this bond is unusable". Callers treat None as "skip this device".
+    try:
+        irk = pid[:32].upper()
+        ltk = penc[:32].upper()
+        rand = int(_rev(penc[32:48]), 16)
+        ediv = int(_rev(penc[48:52]), 16)
+    except ValueError:
+        return None
     return f"""[General]
 Name={name}
 Appearance=0x0180
@@ -130,10 +136,15 @@ def run():
         if len(penc) < 52 or len(pid) < 32:
             skipped.append(name)
             continue
+        info = gen_info(name, pid, penc)
+        if info is None:                    # keys present but not valid hex -- unusable bond
+            skipped.append(name)
+            log(f"skipped {name} ({sec.upper()}): malformed LE keys")
+            continue
         dest = os.path.join(BLUEZ_BASE, adapter, sec.upper())
         os.makedirs(dest, exist_ok=True)
         with open(os.path.join(dest, "info"), "w") as f:
-            f.write(gen_info(name, pid, penc))
+            f.write(info)
         imported.append(name)
         log(f"imported {name} ({sec.upper()})")
 
