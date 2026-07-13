@@ -38,9 +38,11 @@ def serialize(d):
 
 def gate_vars(ce_slot, default):
     boot, dtbo = "boot" + ce_slot, "dtbo" + ce_slot
+    # Trailing hdmitx= (empty) overrides the bootloader's "hdmitx=,444,8bit"
+    # attr pin, which otherwise blocks HDR10/HLG output (VPP tonemaps to SDR).
     bootcefromemmc = (
         'setenv bootargs "${bootargs} BOOT_IMAGE=kernel.img boot=LABEL=CE_FLASH '
-        'disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet"; '
+        'disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet hdmitx="; '
         'setenv loadaddr ${loadaddr_kernel}; '
         f'store read ${{dtb_mem_addr}} {dtbo} 0 0x20000; '
         f'if imgread kernel {boot} ${{loadaddr}}; then bootm ${{loadaddr}}; fi'
