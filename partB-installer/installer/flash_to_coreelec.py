@@ -24,7 +24,7 @@ import argparse, base64, gzip, hashlib, os, socket, subprocess, sys, struct, tim
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import envtool, build_env, ab_misc, layout as L, devices, bundle  # noqa: E402
+import envtool, build_env, ab_misc, layout as L, devices, bundle, install_state  # noqa: E402
 
 # Build stamp printed in every run header (flash + finish). A hardcoded constant on
 # PURPOSE: it is compiled into the bytecode, so a stale __pycache__/*.pyc (the classic
@@ -97,6 +97,11 @@ def main():
         print("\nDRY-RUN only. Re-run with --yes to install.")
         return
     g.backups_to_pc(ce_slot)
+    # Record the boot default for the later stages. stage1's reboot factory-resets the env,
+    # so the DEVICE forgets which OS the user chose -- and stage2 has to rebuild the gate
+    # from scratch. The PC is the only thing left that knows. (See build/install_state.py.)
+    sp = install_state.save(g.device, default=g.default, serial=g.serial, build=BUILD)
+    print(f"  boot default '{g.default}' recorded for stage2 -> {os.path.relpath(sp, HERE)}")
     g.reguard()
     # OTA disable runs BEFORE write_all: the quiesce inside write_all stops the
     # Android framework, and `pm` needs the framework. Transient either way (the

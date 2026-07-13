@@ -14,15 +14,18 @@ Files written to /flash (= CE_FLASH, which the CE update does NOT erase):
 
   python deploy_flash_recovery.py --serial <serial>
 """
-import argparse, os, subprocess, sys
+import argparse, hashlib, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import envtool  # noqa: E402
+import bundle   # noqa: E402  -- SHA256SUMS.txt check on the hook we install
 
 HOOK = next((p for p in (os.path.join(HERE, "..", "payload", "flash", "user-update.sh"),
                          os.path.join(HERE, "..", "flash", "user-update.sh"))
              if os.path.exists(p)), None)
+
+MNT = "/mnt/ceflash"
 
 
 def su(serial, cmd):
@@ -33,6 +36,43 @@ def su(serial, cmd):
 
 def push(serial, local, remote):
     return subprocess.run(["adb", "-s", serial, "push", local, remote], capture_output=True).returncode
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def verify_on_flash(serial, want):
+    """Re-mount CE_FLASH READ-ONLY and hash what is actually on it. `want` maps filename ->
+    expected sha256.
+
+    This exists because the write cannot be trusted on its own. If the rw mount fails, `cp`
+    does not fail -- it writes into /mnt/ceflash as an ordinary directory on the root
+    filesystem, `ls` then lists the files perfectly happily, and the whole thing reports
+    success while CE_FLASH stays empty. Nobody finds out until a CoreELEC update rewrites
+    bootcmd and the hook that was supposed to restore the gate turns out to have never been
+    there. So: unmount, mount again read-only, and hash the bytes off the partition."""
+    out, _ = su(serial, (
+        f"mkdir -p {MNT}; umount {MNT} 2>/dev/null; "
+        f"mount -t vfat -o ro /dev/block/by-name/CE_FLASH {MNT} || {{ echo NOMOUNT; exit 1; }}; "
+        + "".join(f"sha256sum {MNT}/{n}; " for n in want) +
+        f"umount {MNT} 2>/dev/null; echo VERIFIED"))
+    text = out.decode("utf-8", "replace")
+    if "VERIFIED" not in text or "NOMOUNT" in text:
+        sys.exit(f"could not re-mount CE_FLASH to verify the files:\n{text.strip()}")
+    got = {}
+    for ln in text.splitlines():
+        p = ln.split()
+        if len(p) == 2 and p[1].startswith(MNT + "/"):
+            got[os.path.basename(p[1])] = p[0].lower()
+    bad = [n for n, h in want.items() if got.get(n) != h]
+    for n, h in want.items():
+        mark = "OK  " if got.get(n) == h else "FAIL"
+        print(f"  {mark} /flash/{n}  {got.get(n, '(missing)')[:16]}")
+    if bad:
+        sys.exit(f"/flash verify FAILED for {bad} -- the file(s) are NOT on CE_FLASH "
+                 f"(a failed mount would write them to the root filesystem instead, where "
+                 f"they vanish). The dual-boot would not survive a CoreELEC OS update.")
 
 
 def main():
@@ -66,28 +106,51 @@ def main():
     slot = ce_slot[-1]
     print(f"  env_dualboot.bin default = {default}")
 
+    # The hook IS the update-survival mechanism -- a CoreELEC update resets bootcmd to
+    # stock, and user-update.sh is what dd's the gated env back. Missing it used to be
+    # silent (HOOK=None, and the copy simply skipped).
+    if HOOK is None:
+        sys.exit("user-update.sh not found (payload/flash/ or flash/) -- that hook is what "
+                 "restores the boot gate after a CoreELEC OS update. Refusing to deploy a "
+                 "recovery set without it.")
+    bundle.verify(HOOK)                      # it runs as root out of the initramfs
+    conf = f"CE_SLOT={slot}\n".encode()
+    hook_bytes = open(HOOK, "rb").read()
+
     tmp = os.path.join(HERE, "_envdb.bin")
     open(tmp, "wb").write(img)
-    if push(s, tmp, "/data/local/tmp/_envdb.bin") != 0:
-        os.remove(tmp); sys.exit("push env failed")
+    ok = push(s, tmp, "/data/local/tmp/_envdb.bin") == 0
     os.remove(tmp)
-    if HOOK and push(s, HOOK, "/data/local/tmp/_uu.sh") != 0:
+    if not ok:
+        sys.exit("push env failed")
+    if push(s, HOOK, "/data/local/tmp/_uu.sh") != 0:
         sys.exit("push hook failed")
 
+    # Fail-closed: `set -e` plus an explicit mount check. Without both, a failed mount left
+    # cp writing into /mnt/ceflash as a plain directory on the root filesystem and the old
+    # script still printed DONE (`;`-joined, unconditional echo).
     script = (
-        "mkdir -p /mnt/ceflash; "
-        "mount -t vfat -o rw /dev/block/by-name/CE_FLASH /mnt/ceflash 2>/dev/null; "
-        "mount -o rw,remount /mnt/ceflash 2>/dev/null; "
-        "cp /data/local/tmp/_envdb.bin /mnt/ceflash/env_dualboot.bin; "
-        f"printf 'CE_SLOT={slot}\\n' > /mnt/ceflash/ce_slot.conf; "
-        "[ -f /data/local/tmp/_uu.sh ] && { cp /data/local/tmp/_uu.sh /mnt/ceflash/user-update.sh; chmod 0755 /mnt/ceflash/user-update.sh; }; "
-        "sync; ls -la /mnt/ceflash/env_dualboot.bin /mnt/ceflash/ce_slot.conf /mnt/ceflash/user-update.sh; "
-        "umount /mnt/ceflash 2>/dev/null; rm -f /data/local/tmp/_envdb.bin /data/local/tmp/_uu.sh; echo DONE")
+        "set -e; "
+        f"mkdir -p {MNT}; umount {MNT} 2>/dev/null || true; "
+        f"mount -t vfat -o rw /dev/block/by-name/CE_FLASH {MNT}; "
+        f"grep -qs ' {MNT} ' /proc/mounts || {{ echo NOT_A_MOUNT; exit 1; }}; "
+        f"cp /data/local/tmp/_envdb.bin {MNT}/env_dualboot.bin; "
+        f"printf 'CE_SLOT={slot}\\n' > {MNT}/ce_slot.conf; "
+        f"cp /data/local/tmp/_uu.sh {MNT}/user-update.sh; chmod 0755 {MNT}/user-update.sh; "
+        f"sync; umount {MNT}; "
+        "rm -f /data/local/tmp/_envdb.bin /data/local/tmp/_uu.sh; echo WROTE")
     out, rc = su(s, script)
-    print(out.decode("utf-8", "replace"))
-    if "DONE" not in out.decode("utf-8", "replace"):
-        sys.exit("deploy failed")
-    print(f"OK -- /flash recovery files written (CE_SLOT={slot}, env_dualboot.bin gated+boot_ce=1).")
+    text = out.decode("utf-8", "replace")
+    if rc != 0 or "WROTE" not in text:
+        sys.exit(f"/flash write failed (rc={rc}): {text.strip() or '(no output)'}")
+
+    # Read the bytes back off the partition -- see verify_on_flash().
+    print("-- verify (re-mounted read-only, hashed off CE_FLASH) --")
+    verify_on_flash(s, {"env_dualboot.bin": sha256(img),
+                        "ce_slot.conf": sha256(conf),
+                        "user-update.sh": sha256(hook_bytes)})
+    print(f"OK -- /flash recovery files verified on CE_FLASH "
+          f"(CE_SLOT={slot}, env_dualboot.bin gated+boot_ce=1).")
 
 
 if __name__ == "__main__":

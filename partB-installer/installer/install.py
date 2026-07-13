@@ -59,6 +59,7 @@ PY = sys.executable
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import devices  # noqa: E402  -- stick/box discrimination registry
 import bundle   # noqa: E402  -- SHA256SUMS.txt check for anything we flash
+import install_state  # noqa: E402  -- the boot default stage1 recorded, for stage2
 
 
 def run(script, *args):
@@ -623,7 +624,8 @@ def stage1b(a):
 # ---- stage 1: core destructive install ---------------------------------------
 def stage1(a):
     print("== stage1: CORE install (destructive) ==")
-    args = ["--serial", a.serial, "--default", a.default] + (["--yes"] if a.yes else ["--dry-run"])
+    default = a.default or "android"
+    args = ["--serial", a.serial, "--default", default] + (["--yes"] if a.yes else ["--dry-run"])
     rc = run("flash_to_coreelec.py", *args)
     if rc == 0 and a.yes:
         print("\nstage1 done. The NEXT reboot enters recovery and reformats userdata")
@@ -632,37 +634,99 @@ def stage1(a):
         print("  adb reboot")
         print("  python install.py stage1b   # re-install Magisk APK")
         print("  python install.py stage2    # after root confirmed")
+        # stage1 recorded default='{default}', and stage2 reads it back, so the flag does
+        # not have to be repeated. Say so rather than leave the user guessing -- the boot
+        # direction silently flipping is exactly the bug this replaced.
+        print(f"  (boot default '{default}' was recorded -- stage2 picks it up automatically)")
     return rc
 
 
 # ---- stage 2: apps + universal OTA block -------------------------------------
+def resolve_default(a, dev):
+    """Which OS a normal reboot should boot: the flag, else what stage1 recorded for THIS
+    unit, else android. The device cannot be asked -- stage1's factory reset wiped the env
+    that held the answer -- so a stage2 that just assumed 'android' silently flipped a
+    --default coreelec install back to Android."""
+    if a.default:
+        return a.default, "--default on the command line"
+    saved = install_state.load(dev).get("default")
+    if saved in ("android", "coreelec"):
+        return saved, f"recorded by stage1 ({os.path.basename(install_state.path_for(dev))})"
+    return "android", "the built-in default (stage1 recorded nothing for this unit)"
+
+
 def stage2(a):
     print("== stage2: apps + universal GMS OTA block (Google TV) ==")
-    # The stage1 reboot runs a recovery factory-reset (to reformat userdata) which on
-    # this SoC resets the u-boot env to stock -- dropping the boot gate AND the generic
-    # boot helpers it needs. Re-apply the FULL gate now, post-reset, so it persists.
+
+    # Precondition: this really is a post-stage1 unit, and it is rooted. stage2 writes the
+    # boot gate and mounts CE_FLASH -- neither means anything on a device stage1 never
+    # touched, and every sub-script below needs root.
+    dev = devices.identify(lambda p: getprop(a.serial, p), None,
+                           require_layout=True, log=print)
+    check_post_stage1_state(a.serial, dev)
+    if "uid=0" not in su(a.serial, "id", timeout=15)[0]:
+        sys.exit("su root not available -- run stage1b first (it re-installs the Magisk app "
+                 "that the userdata reformat erased).")
+    print("  root: ok")
+
+    default, why = resolve_default(a, dev)
+    print(f"  boot default: {default}  ({why})")
+
+    # Steps that the dual-boot cannot live without are fatal; the two feature modules at the
+    # end are not (blockgms legitimately does not apply to a non-GMS box), so they warn and
+    # let an otherwise-complete install finish. stage2 used to return install_blockgms's
+    # exit code -- the LEAST critical step -- while ignoring the rc of everything above it.
+    warned = []
+
+    # The stage1 reboot runs a recovery factory-reset (to reformat userdata) which on this
+    # SoC resets the u-boot env to stock -- dropping the boot gate AND the generic boot
+    # helpers it needs. Re-apply the FULL gate now, post-reset, so it persists.
     # Idempotent: if the env still has the gate, reassert_env_gate just re-asserts it.
-    print("-- (re)assert env boot gate (stage1's factory reset clears env) --")
-    rc = run("reassert_env_gate.py", "--serial", a.serial, "--default", a.default)
-    if rc != 0:
-        sys.exit("env gate (re)assert failed -- CoreELEC would be unreachable; fix before continuing")
+    print("\n-- (re)assert env boot gate (stage1's factory reset clears env) --")
+    if run("reassert_env_gate.py", "--serial", a.serial, "--default", default) != 0:
+        sys.exit("env gate (re)assert FAILED -- CoreELEC would be unreachable. Fix this "
+                 "before continuing; nothing below it matters without the gate.")
+
+    # The switcher app IS how a user enters CoreELEC on an android-default box.
+    print("\n-- install RebootToCoreELEC app --")
     apk = os.path.join(ART, "RebootToCoreELEC.apk")
     if not os.path.exists(apk):
         sys.exit("missing RebootToCoreELEC.apk")
-    print("-- install RebootToCoreELEC app --")
+    bundle.verify(apk)
     r = adb(a.serial, "install", "-r", apk, capture_output=True)
-    print("  " + r.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
-    print("-- /flash recovery files (ce_slot.conf, env_dualboot.bin, hook) [Xiaomi] --")
-    run("deploy_flash_recovery.py", "--serial", a.serial, "--default", a.default)
-    print("-- toolbox_export module: Android->CoreELEC BT/MAC export [generic] --")
-    run("install_toolbox_export.py", "--serial", a.serial)
-    print("-- blockgms: GMS system-update components [generic Google TV] --")
-    rc = run("install_blockgms.py", "--serial", a.serial)
-    if rc == 0:
-        print("\nstage2 done. Reboot to activate the modules; then optionally stage2a (Xiaomi).")
-        print("After rebooting into CoreELEC (first CE boot), run stage3:")
-        print("  python install.py stage3 --host <coreelec-ip>")
-    return rc
+    out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+    if r.returncode != 0 or "Success" not in out:
+        # rc was never checked here, and the old code also indexed [-1] of an empty stdout
+        # (adb reports failures on stderr) -- an IndexError instead of a diagnosis.
+        sys.exit(f"RebootToCoreELEC install FAILED: {out or '(no output)'}\n"
+                 f"Without it there is no way to enter CoreELEC on an android-default box.")
+    print(f"  {out.splitlines()[-1]}")
+
+    # Without these, a CoreELEC OS update rewrites bootcmd to stock and the dual-boot is
+    # gone -- with nothing on /flash to put it back. Silent failure here surfaces months
+    # later, as a box that stops booting CoreELEC after an update.
+    print("\n-- /flash recovery files (ce_slot.conf, env_dualboot.bin, hook) [Xiaomi] --")
+    if run("deploy_flash_recovery.py", "--serial", a.serial, "--default", default) != 0:
+        sys.exit("/flash recovery deploy FAILED -- the dual-boot would not survive a "
+                 "CoreELEC OS update. Fix this before continuing.")
+
+    print("\n-- toolbox_export module: Android->CoreELEC BT/MAC export [generic] --")
+    if run("install_toolbox_export.py", "--serial", a.serial) != 0:
+        warned.append("toolbox_export (Bluetooth/MAC export to CoreELEC) was NOT installed")
+
+    print("\n-- blockgms: GMS system-update components [generic Google TV] --")
+    if run("install_blockgms.py", "--serial", a.serial) != 0:
+        warned.append("blockgms (GMS system-update block) was NOT installed -- a Google TV "
+                      "OTA could still overwrite the dual-boot")
+
+    print("\nstage2 done. Reboot to activate the modules; then optionally stage2a (Xiaomi).")
+    for w in warned:
+        print(f"  WARNING: {w}")
+    if warned:
+        print("  (the dual-boot itself is complete -- these are optional protections)")
+    print("After rebooting into CoreELEC (first CE boot), run stage3:")
+    print("  python install.py stage3 --host <coreelec-ip>")
+    return 0
 
 
 # ---- stage 2a: Xiaomi updater block (optional) -------------------------------
@@ -708,9 +772,14 @@ def main():
                     "omit to auto-pick the only attached device")
     ap.add_argument("--host", help="CoreELEC IP (stage3; device booted into CoreELEC)")
     ap.add_argument("--yes", action="store_true", help="perform destructive stage1 writes")
-    ap.add_argument("--default", choices=["android", "coreelec"], default="android",
+    # default=None, NOT "android": stage2 has to tell "the user asked for android" apart
+    # from "the user said nothing", because in the second case the right answer is whatever
+    # stage1 recorded for this unit -- the device itself cannot remember (the factory reset
+    # wipes the env). See resolve_default() / build/install_state.py.
+    ap.add_argument("--default", choices=["android", "coreelec"], default=None,
                     help="which OS a normal reboot boots (default android). 'coreelec' = "
-                         "CoreELEC default + reboot-to-eMMC/nand -> Android.")
+                         "CoreELEC default + reboot-to-eMMC/nand -> Android. stage1 records "
+                         "this; stage2 reuses what stage1 recorded unless you pass it again.")
     ap.add_argument("--xiaomi", action="store_true",
                     help="stage3: force the Xiaomi remote keymap (skip auto-detect)")
     ap.add_argument("--no-keymap", dest="no_keymap", action="store_true",

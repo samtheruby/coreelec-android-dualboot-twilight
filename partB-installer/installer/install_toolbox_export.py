@@ -17,6 +17,8 @@ the install, which would erase the module otherwise). Reboot to activate.
 import argparse, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "build"))
+import bundle  # noqa: E402  -- SHA256SUMS.txt check on the module we install
 # module source lives at ../modules/toolbox_export (repo) or ../toolbox_export (bundle)
 MOD = next((p for p in (os.path.join(HERE, "..", "modules", "toolbox_export"),
                         os.path.join(HERE, "..", "toolbox_export"))
@@ -46,9 +48,11 @@ def main():
         sys.exit("toolbox_export module source not found (modules/toolbox_export)")
     if "uid=0" not in su(a.serial, "id")[0]:
         sys.exit("no root")
-    if not su(a.serial, "[ -d /data/adb/magisk ] && echo y")[0].strip() == "y":
+    if su(a.serial, "[ -d /data/adb/magisk ] && echo y")[0].strip() != "y":
         sys.exit("/data/adb/magisk not found -- Magisk-rooted + booted into Android required")
 
+    # service.sh runs as ROOT on every boot -- check it against the manifest first.
+    bundle.verify([os.path.join(MOD, f) for f in ("module.prop", "service.sh")])
     for f in ("module.prop", "service.sh"):
         r = subprocess.run(["adb", "-s", a.serial, "push", os.path.join(MOD, f),
                             f"/data/local/tmp/{f}"], capture_output=True)
