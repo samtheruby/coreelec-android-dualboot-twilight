@@ -18,6 +18,9 @@ ADDON = xbmcaddon.Addon()
 NAME = ADDON.getAddonInfo("name")
 EXPORT = "/flash/android_bt_config.conf"
 BLUEZ_BASE = "/storage/.cache/bluetooth"
+MAIN_CONF = "/etc/bluetooth/main.conf"
+MAIN_CONF_OVR = "/storage/.config/bluetooth-main.conf"
+PRIVACY_UNIT = "/storage/.config/system.d/bluetooth-privacy.service"
 
 
 def log(m):
@@ -91,6 +94,76 @@ Timeout=500
 """
 
 
+def ensure_local_identity(adapter, cfg):
+    """Present Android's BLE identity, not just its device bonds.
+
+    Android pairs with privacy on: it connects from an RPA and distributes its
+    local IRK. A remote that holds the host's IRK REJECTS connections from the
+    bare public address at the link layer (0x3e connect/drop loop, several per
+    second, no SMP traffic at all) -- so importing the LTK alone is not enough.
+    Adopt Android's local IRK as BlueZ's identity and turn privacy on so the
+    kernel also connects from an RPA the remote can resolve.
+
+    /etc is squashfs, so Privacy=device goes into a copy of main.conf that a
+    oneshot unit bind-mounts before bluetooth.service starts (bluetooth.service
+    itself is stripped to CAP_NET_* and cannot mount).
+
+    Returns True if anything changed (caller should restart bluetooth)."""
+    changed = False
+    irk = cfg["Adapter"].get("LE_LOCAL_KEY_IRK", "").strip().upper() \
+        if cfg.has_section("Adapter") else ""
+    if len(irk) == 32:
+        ident = os.path.join(BLUEZ_BASE, adapter, "identity")
+        want = f"[General]\nIdentityResolvingKey={irk}\n"
+        try:
+            cur = open(ident).read()
+        except OSError:
+            cur = ""
+        if cur != want:
+            with open(ident, "w") as f:
+                f.write(want)
+            os.chmod(ident, 0o600)
+            changed = True
+            log("installed Android local IRK as adapter identity")
+
+    if not os.path.exists(MAIN_CONF_OVR) or \
+            "\nPrivacy = device" not in open(MAIN_CONF_OVR).read():
+        conf = open(MAIN_CONF).read()
+        if "\nPrivacy = device" not in conf:
+            if "#Privacy = off" in conf:
+                conf = conf.replace("#Privacy = off", "Privacy = device", 1)
+            else:
+                conf = conf.replace("[General]", "[General]\nPrivacy = device", 1)
+        with open(MAIN_CONF_OVR, "w") as f:
+            f.write(conf)
+        changed = True
+        log("wrote privacy-enabled main.conf override")
+
+    if not os.path.exists(PRIVACY_UNIT):
+        os.makedirs(os.path.dirname(PRIVACY_UNIT), exist_ok=True)
+        with open(PRIVACY_UNIT, "w") as f:
+            f.write(
+                "[Unit]\n"
+                "Description=Bind privacy-enabled Bluetooth main.conf (dual-boot BLE identity)\n"
+                "Before=bluetooth.service\n"
+                f"ConditionPathExists={MAIN_CONF_OVR}\n"
+                "\n"
+                "[Service]\n"
+                "Type=oneshot\n"
+                "RemainAfterExit=yes\n"
+                "ExecStart=/bin/sh -c \"grep -q ' /etc/bluetooth/main.conf ' /proc/mounts || "
+                f"mount --bind {MAIN_CONF_OVR} /etc/bluetooth/main.conf\"\n"
+                "\n"
+                "[Install]\n"
+                "WantedBy=multi-user.target\n")
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "enable", "bluetooth-privacy.service"], check=False)
+        changed = True
+        log("installed + enabled bluetooth-privacy.service")
+    subprocess.run(["systemctl", "start", "bluetooth-privacy.service"], check=False)
+    return changed
+
+
 def run():
     if not os.path.exists(EXPORT):
         xbmcgui.Dialog().ok(
@@ -123,6 +196,8 @@ def run():
                 "Remotes may not reconnect. Import anyway?"):
             return
 
+    identity_changed = ensure_local_identity(adapter, cfg)
+
     imported, skipped = [], []
     for sec in cfg.sections():
         d = cfg[sec]
@@ -148,7 +223,7 @@ def run():
         imported.append(name)
         log(f"imported {name} ({sec.upper()})")
 
-    if imported:
+    if imported or identity_changed:
         subprocess.run(["systemctl", "restart", "bluetooth"], check=False)
 
     msg = ("Imported -- now work in CoreELEC:\n - " + "\n - ".join(imported)) if imported \
