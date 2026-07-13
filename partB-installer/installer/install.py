@@ -732,6 +732,15 @@ def stage2(a):
 # ---- stage 2a: Xiaomi updater block (optional) -------------------------------
 def stage2a(a):
     print("== stage2a: Xiaomi auto-update block (optional, Xiaomi only) ==")
+    # Same precondition as stage2: a Magisk module and a persistent `pm disable` mean
+    # nothing on a device that is not a rooted, post-stage1 unit.
+    dev = devices.identify(lambda p: getprop(a.serial, p), None,
+                           require_layout=True, log=print)
+    check_post_stage1_state(a.serial, dev)
+    if "uid=0" not in su(a.serial, "id", timeout=15)[0]:
+        sys.exit("su root not available -- run stage1b first.")
+    # install_blockota verifies its OWN end state now (it exits non-zero if the updater is
+    # not actually disabled), so its rc is worth propagating.
     return run("install_blockota.py", "--serial", a.serial)
 
 

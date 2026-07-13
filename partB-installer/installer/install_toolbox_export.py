@@ -14,23 +14,21 @@ the install, which would erase the module otherwise). Reboot to activate.
   python install_toolbox_export.py --serial <serial>            # install
   python install_toolbox_export.py --serial <serial> --verify    # check (after reboot)
 """
-import argparse, os, subprocess, sys
+import argparse, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import bundle  # noqa: E402  -- SHA256SUMS.txt check on the module we install
-# module source lives at ../modules/toolbox_export (repo) or ../toolbox_export (bundle)
-MOD = next((p for p in (os.path.join(HERE, "..", "modules", "toolbox_export"),
-                        os.path.join(HERE, "..", "toolbox_export"))
-            if os.path.exists(os.path.join(p, "module.prop"))), None)
+import magisk_module as M  # noqa: E402
+
 MODID = "toolbox_export"
 MDIR = f"/data/adb/modules/{MODID}"
+# module source: repo layout, then shipped-bundle layout
+MOD = M.find_source(os.path.join(HERE, "..", "modules", "toolbox_export"),
+                    os.path.join(HERE, "..", "toolbox_export"))
 
 
 def su(serial, cmd):
-    r = subprocess.run(["adb", "-s", serial, "exec-out",
-                        "su -c '" + cmd.replace("'", "'\\''") + "'"], capture_output=True)
-    return r.stdout.decode("utf-8", "replace"), r.returncode
+    return M.su(serial, cmd)
 
 
 def main():
@@ -44,30 +42,8 @@ def main():
     if a.verify:
         verify(a.serial)
         return
-    if MOD is None:
-        sys.exit("toolbox_export module source not found (modules/toolbox_export)")
-    if "uid=0" not in su(a.serial, "id")[0]:
-        sys.exit("no root")
-    if su(a.serial, "[ -d /data/adb/magisk ] && echo y")[0].strip() != "y":
-        sys.exit("/data/adb/magisk not found -- Magisk-rooted + booted into Android required")
-
-    # service.sh runs as ROOT on every boot -- check it against the manifest first.
-    bundle.verify([os.path.join(MOD, f) for f in ("module.prop", "service.sh")])
-    for f in ("module.prop", "service.sh"):
-        r = subprocess.run(["adb", "-s", a.serial, "push", os.path.join(MOD, f),
-                            f"/data/local/tmp/{f}"], capture_output=True)
-        if r.returncode != 0:
-            sys.exit("push failed: " + r.stderr.decode("utf-8", "replace"))
-        print(f"  pushed {f}")
-    script = (f"set -e; mkdir -p {MDIR}; "
-              f"cp /data/local/tmp/module.prop {MDIR}/module.prop; "
-              f"cp /data/local/tmp/service.sh {MDIR}/service.sh; "
-              f"chmod 0755 {MDIR}/service.sh; chmod 0644 {MDIR}/module.prop; "
-              f"rm -f /data/local/tmp/module.prop /data/local/tmp/service.sh; echo placed")
-    o, rc = su(a.serial, script)
-    if rc != 0 or "placed" not in o:
-        sys.exit("module placement failed: " + o)
-    print(f"  module placed in {MDIR}")
+    M.require_rooted_android(a.serial)
+    M.install(a.serial, MOD, MODID)
     print(f"\nInstalled '{MODID}'. Reboot to run its first export:")
     print(f"  adb -s {a.serial} reboot")
     print(f"Verify after reboot: python install_toolbox_export.py --serial {a.serial} --verify")

@@ -15,17 +15,17 @@ drops the module so it also re-asserts each boot where it can.
 
 Reversible: --revert re-enables the components; remove the Magisk module to undo fully.
 """
-import argparse, os, subprocess, sys
+import argparse, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
-import bundle  # noqa: E402  -- SHA256SUMS.txt check on the module we install
-# module source lives at ../modules/blockgms (repo) or ../blockgms (shipped bundle)
-MOD = next((p for p in (os.path.join(HERE, "..", "modules", "blockgms"),
-                        os.path.join(HERE, "..", "blockgms"))
-            if os.path.exists(os.path.join(p, "module.prop"))), None)
+import magisk_module as M  # noqa: E402
+
 MODID = "blockgms_sysupdate"
 MDIR = f"/data/adb/modules/{MODID}"
+# module source: repo layout, then shipped-bundle layout
+MOD = M.find_source(os.path.join(HERE, "..", "modules", "blockgms"),
+                    os.path.join(HERE, "..", "blockgms"))
 
 GMS = "com.google.android.gms"
 COMPS = [
@@ -41,9 +41,7 @@ COMPS = [
 
 
 def su(serial, cmd):
-    r = subprocess.run(["adb", "-s", serial, "exec-out",
-                        "su -c '" + cmd.replace("'", "'\\''") + "'"], capture_output=True)
-    return r.stdout.decode("utf-8", "replace"), r.returncode
+    return M.su(serial, cmd)
 
 
 def apply_disable(serial, verb):
@@ -66,12 +64,11 @@ def main():
     import adb_serial
     a.serial = adb_serial.resolve(a.serial)
 
-    if "uid=0" not in su(a.serial, "id")[0]:
-        sys.exit("no root")
-
     if a.verify:
         verify(a.serial)
         return
+
+    M.require_rooted_android(a.serial)
 
     if a.revert:
         print("re-enabling GMS system-update components:")
@@ -80,33 +77,10 @@ def main():
         print(f"\nNow remove the module to fully undo:  adb -s {a.serial} shell su -c 'rm -rf {MDIR}' ; reboot")
         return
 
-    # MOD is None when neither module source path exists. Unchecked, os.path.join(None, f)
-    # below raised a TypeError traceback instead of saying what was wrong.
-    if MOD is None:
-        sys.exit("blockgms module source not found (modules/blockgms or blockgms/)")
-    if su(a.serial, "[ -d /data/adb/magisk ] && echo y")[0].strip() != "y":
-        sys.exit("/data/adb/magisk not found -- Magisk-rooted + booted into Android required")
     if GMS not in su(a.serial, f"pm path {GMS}")[0]:
         sys.exit(f"{GMS} not present -- is this a Google/Android TV (GMS) box?")
 
-    # place module. service.sh runs as ROOT on every boot, so check it against the manifest
-    # before it goes anywhere near /data/adb/modules.
-    bundle.verify([os.path.join(MOD, f) for f in ("module.prop", "service.sh")])
-    for f in ("module.prop", "service.sh"):
-        r = subprocess.run(["adb", "-s", a.serial, "push", os.path.join(MOD, f),
-                            f"/data/local/tmp/{f}"], capture_output=True)
-        if r.returncode != 0:
-            sys.exit("push failed: " + r.stderr.decode("utf-8", "replace"))
-        print(f"  pushed {f}")
-    script = (f"set -e; mkdir -p {MDIR}; "
-              f"cp /data/local/tmp/module.prop {MDIR}/module.prop; "
-              f"cp /data/local/tmp/service.sh {MDIR}/service.sh; "
-              f"chmod 0755 {MDIR}/service.sh; chmod 0644 {MDIR}/module.prop; "
-              f"rm -f /data/local/tmp/module.prop /data/local/tmp/service.sh; echo placed")
-    o, rc = su(a.serial, script)
-    if rc != 0 or "placed" not in o:
-        sys.exit("module placement failed: " + o)
-    print("  module placed in " + MDIR)
+    M.install(a.serial, MOD, MODID)
 
     # apply the persistent component-disable now (this is the durable mechanism)
     print("\ndisabling GMS .update.* components (persistent):")

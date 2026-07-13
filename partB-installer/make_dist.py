@@ -31,7 +31,7 @@ import devices  # noqa: E402
 # bundle.py is what checks the shipped artifacts against the SHA256SUMS.txt written at
 # the bottom of this file -- ship it or the installer flashes them unverified.
 BUILD_PY = ["envtool.py", "build_env.py", "ab_misc.py", "layout.py", "devices.py",
-            "bundle.py", "install_state.py"]
+            "bundle.py", "install_state.py", "magisk_module.py"]
 INSTALLER = ["install.py", "adb_serial.py", "flash_to_coreelec.py", "deploy_flash_recovery.py",
              "reassert_env_gate.py", "install_blockgms.py", "install_blockota.py",
              "install_toolbox_export.py", "deploy_toolbox_addon.py",
