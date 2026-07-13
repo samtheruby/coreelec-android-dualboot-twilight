@@ -997,6 +997,9 @@ class Ctx:
         sec[64:832] = bytearray(768)                      # clear recovery[768]
         rec = b"recovery\n--wipe_data\n"
         sec[64:64 + len(rec)] = rec
+        # makedirs: finish_install --arm-reformat reaches here without require_artifacts
+        # (it needs no artifacts), so artifacts/<slug>/ is not guaranteed to exist.
+        os.makedirs(self.artdir, exist_ok=True)
         path = os.path.join(self.artdir, "_bcb_wipe.bin")
         open(path, "wb").write(bytes(sec))
         self.write_sector_b64(path, "/dev/block/by-name/misc", 0)

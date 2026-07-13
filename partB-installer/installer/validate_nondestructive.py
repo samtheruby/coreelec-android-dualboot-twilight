@@ -7,7 +7,7 @@ app's Kotlin env codec against the PC envtool.
 
 Usage: python validate_nondestructive.py --serial <serial>
 """
-import argparse, base64, os, subprocess, sys, struct, zlib
+import argparse, os, subprocess, sys, struct, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
@@ -106,7 +106,8 @@ def main():
     art_dev = os.path.join(ART, dev.slug)          # artifacts/<slug>/
     gp = open(os.path.join(art_dev, "gpt_primary.bin"), "rb").read()
     num = struct.unpack_from("<I", gp, 512 + 80)[0]
-    chk(num == 128, "artifact GPT has 128 entries")
+    chk(num == devices.CARVED_NUM_ENTRIES,
+        f"artifact GPT has {devices.CARVED_NUM_ENTRIES} entries")
     secs = {n: (a, b, c) for n, a, b, c in L.as_sectors(dev)}
     chk(secs["CE_STORAGE"][1] == dev.stock_ud_last_lba,
         f"CE_STORAGE ends where stock userdata did ({secs['CE_STORAGE'][1]} == {dev.stock_ud_last_lba})")

@@ -15,8 +15,16 @@ the hash-gate makes re-writes a no-op once a region is correct. Note the gate re
 each region off the eMMC to hash it, so a run that skips the big CE images still
 spends a few minutes hashing 10 GiB+ -- expected, not a hang.
 
+--arm-reformat is a separate, narrower job on the same device: the install COMPLETED but
+its userdata reformat never ran, so Android is up on the old oversized filesystem (stage1b
+detects and refuses this). The completion path above cannot repair that -- it only arms the
+BCB when it had to quiesce a live old-geometry /data, and post-reboot the kernel already
+maps userdata at the carved size, so that arm never fires. --arm-reformat just re-arms the
+BCB and stops.
+
   python finish_install.py --serial <serial> --dry-run
   python finish_install.py --serial <serial> --yes
+  python finish_install.py --serial <serial> --arm-reformat --yes   # re-arm only
 """
 import argparse, os, sys
 
@@ -38,6 +46,11 @@ def main():
     ap.add_argument("--default", choices=["android", "coreelec"], default="android",
                     help="which OS a normal reboot boots -- pass the SAME value the "
                          "original stage1 used (default: android)")
+    ap.add_argument("--arm-reformat", dest="arm_reformat", action="store_true",
+                    help="ONLY re-arm the userdata reformat (BCB -> recovery --wipe_data) "
+                         "and stop. For a unit whose install completed but whose reformat "
+                         "never ran, so Android is up on an oversized filesystem (stage1b "
+                         "detects this). WIPES /data on the next boot. Needs --yes.")
     a = ap.parse_args()
     import adb_serial
     a.serial = adb_serial.resolve(a.serial)
@@ -56,13 +69,13 @@ def main():
                            require_layout=True, log=print)
     g.device = dev
     g.artdir = F.artdir_for(dev)
-    F.require_artifacts(dev)
     if "uid=0" not in g.su("id")[0]:
         sys.exit("su root not available")
-    g.pipefail = g.su("set -o pipefail 2>/dev/null && echo Y")[0].strip() == "Y"
-    g.check_ce_image_sizes()   # the CE images fit the carve; hashes cached for the gate below
 
-    # sanity: GPT should ALREADY be the carved 128-entry layout (i.e. partly installed)
+    # sanity: GPT should ALREADY be the carved 128-entry layout (i.e. partly installed).
+    # This runs BEFORE require_artifacts / check_ce_image_sizes so that --arm-reformat --
+    # which writes 1 KiB and needs no artifacts at all -- does not first spend minutes
+    # expanding a 10 GiB image to hash it.
     g._drop_caches()
     import struct
     gpt = g.su_bytes(f"dd if={F.DISK} bs=512 count=2 2>/dev/null")
@@ -73,6 +86,30 @@ def main():
     if num != devices.CARVED_NUM_ENTRIES:
         sys.exit(f"GPT entries={num} (expected {devices.CARVED_NUM_ENTRIES}) -- this does "
                  "NOT look partly-installed; use flash_to_coreelec.py instead.")
+
+    # ---- --arm-reformat: re-arm the userdata reformat, and nothing else ----------
+    # For the unit whose install COMPLETED but whose reformat never ran, so Android booted
+    # on the old oversized f2fs (stage1b diagnoses this). The normal completion path below
+    # cannot fix it: it only arms the BCB when it had to quiesce a LIVE old-geometry /data,
+    # and after the reboot the kernel already maps userdata at the carved size, so the
+    # quiesce is skipped and the arm never fires. Hence an explicit door.
+    if a.arm_reformat:
+        if not a.yes:
+            sys.exit("--arm-reformat schedules a recovery FACTORY RESET of userdata on the "
+                     "next boot (it wipes /data -- you will redo the Android setup, then "
+                     "re-run install.py stage1b).\nRe-run with --yes to arm it.")
+        g.arm_factory_reset()
+        print("\n=== userdata reformat re-armed ===")
+        print("  Nothing else was touched -- the rest of the install is left as it is.")
+        print(f"  REBOOT NOW:  adb -s {a.serial} reboot")
+        print("  Recovery reformats userdata to the carved size, then boots Android.")
+        print("  Then: complete the Android setup, re-enable ADB, and run:")
+        print("    python install.py stage1b")
+        return
+
+    F.require_artifacts(dev)
+    g.pipefail = g.su("set -o pipefail 2>/dev/null && echo Y")[0].strip() == "Y"
+    g.check_ce_image_sizes()   # the CE images fit the carve; hashes cached for the gate below
 
     active = g.getprop("ro.boot.slot_suffix")
     ce_slot = {"_a": "_b", "_b": "_a"}.get(active)

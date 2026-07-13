@@ -20,6 +20,10 @@ Two execution contexts: ANDROID phase (--serial, adb) and COREELEC phase
              with --yes: pulls SHA-256-verified backups to pulled_backups/<device>/
              BEFORE the first write, then installs
     --- reboot: recovery reformats userdata, boots Android, then ---
+    stage1b re-install the Magisk APK        [Xiaomi]   INTERACTIVE
+             the reformat wiped /data, taking the Magisk app (and its su database)
+             with it -- init_boot stays patched, so no fastboot. Refuses to run
+             unless this unit really is in the post-stage1 state.
     stage2  apps + modules                   [mixed]    RebootToCoreELEC APK,
               flash-recovery [Xiaomi], toolbox_export module [generic],
               blockgms GMS system-update block [generic]
@@ -40,6 +44,7 @@ Usage (device on USB; with one device attached --serial auto-picks, else add
   python install.py stage_magisk              # bundled image for the identified unit
   python install.py stage_magisk --magisk-img <path>   # your own patched init_boot
   python install.py stage1  --yes
+  python install.py stage1b                   # after the reboot: Magisk app back on
   python install.py stage2
   python install.py stage2a
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
@@ -65,10 +70,31 @@ def adb(serial, *args, **kw):
     return subprocess.run(["adb", "-s", serial, *args], **kw)
 
 
-def su(serial, cmd):
-    r = subprocess.run(["adb", "-s", serial, "exec-out", "su -c '" + cmd.replace("'", "'\\''") + "'"],
-                       capture_output=True)
+def su(serial, cmd, timeout=None):
+    """Run `cmd` as root on the device -> (stdout, returncode).
+
+    `timeout` is not optional in spirit: a Magisk `su` whose manager has not granted the
+    shell yet does not fail, it BLOCKS -- waiting for a grant prompt on a TV that nobody is
+    looking at. Every root check in this file is therefore bounded. A timeout comes back as
+    rc=124 (the shell's own convention) with no output, which reads as "not root" to callers
+    -- exactly what an unanswered prompt means.
+    """
+    try:
+        r = subprocess.run(["adb", "-s", serial, "exec-out",
+                            "su -c '" + cmd.replace("'", "'\\''") + "'"],
+                           capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "", 124
     return r.stdout.decode("utf-8", "replace"), r.returncode
+
+
+def sh(serial, cmd, timeout=20):
+    """Run `cmd` in the plain (NON-root) device shell -> stdout text ('' on failure)."""
+    try:
+        r = adb(serial, "shell", cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ""
+    return r.stdout or ""
 
 
 def getprop(serial, name):
@@ -114,20 +140,19 @@ def wait_for_fastboot(fb, timeout=60):
 
 # ---- Magisk helpers (shared by stage_magisk and stage1b) ----------------------
 def install_magisk_apk(serial, fatal):
-    """Install the bundled Magisk manager APK over adb; True if it went in.
+    """Install the bundled Magisk manager APK over adb.
 
     `fatal` distinguishes the two callers: for stage1b the APK IS the stage, so a failure
     is fatal; for stage_magisk the fastboot flash is the stage, so a failed APK install is
     a warning and the root check at the end of that stage is where the human finds out.
     """
-    apks = sorted(glob.glob(os.path.join(MAGISK_DIR, "Magisk*.apk")) +
-                  glob.glob(os.path.join(ART, "Magisk*.apk")))
+    apks = sorted(glob.glob(os.path.join(MAGISK_DIR, "Magisk*.apk")))
     if not apks:
-        msg = "no Magisk*.apk found in magisk/ or artifacts/"
+        msg = f"no Magisk*.apk found in {os.path.basename(MAGISK_DIR)}/"
         if fatal:
             sys.exit(msg)
         print(f"  ({msg} -- skipping APK install)")
-        return False
+        return
     if len(apks) > 1:
         # The pick is a plain lexicographic last, which is NOT a version sort
         # (Magisk-v9.apk would sort after Magisk-v30.apk). One APK is the expected case,
@@ -135,6 +160,9 @@ def install_magisk_apk(serial, fatal):
         print(f"  WARNING: {len(apks)} Magisk APKs present; using "
               f"{os.path.basename(apks[-1])}. Keep exactly one.")
     apk = apks[-1]
+    # This APK is what grants root: it carries the manager that answers every later su
+    # request. Check it against the manifest like anything else we put on the device.
+    bundle.verify(apk)
     print(f"  installing {os.path.basename(apk)} ...")
     r = adb(serial, "install", "-r", apk, capture_output=True)
     out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
@@ -142,9 +170,8 @@ def install_magisk_apk(serial, fatal):
         if fatal:
             sys.exit(f"  APK install failed: {out}")
         print(f"  WARNING: APK install failed: {out}")
-        return False
+        return
     print("  Magisk APK installed OK")
-    return True
 
 
 def check_boot_image(path):
@@ -478,7 +505,9 @@ def stage_magisk(a):
         if r.returncode == 0 and r.stdout.strip() == "device":
             print("  ADB reconnected.")
             time.sleep(5)  # let the system settle before checking root
-            root_out, _ = su(a.serial, "id")
+            # Bounded: a freshly-flashed unit has no Magisk manager yet, so su may sit
+            # waiting for a grant prompt on the TV rather than answering.
+            root_out, _ = su(a.serial, "id", timeout=15)
             if "uid=0" in root_out:
                 print("  Root verified: Magisk is active.")
             else:
@@ -492,10 +521,84 @@ def stage_magisk(a):
     sys.exit(0)
 
 
+# ---- post-stage1 state: did the reboot actually do its job? -------------------
+def check_post_stage1_state(serial, dev):
+    """Confirm stage1's reboot did what it promised, BEFORE stage1b changes anything.
+
+    Every read here is deliberately NON-root, and that is the whole design. Root is exactly
+    what this stage exists to restore, so a root-only check could only run AFTER the Magisk
+    APK is installed -- by which point we would have installed an app onto a device whose
+    still-pending reformat is about to erase it. Both facts below read fine from the plain
+    shell (verified on the hardware):
+
+      by-name/CE_*      the carved GPT is live AND the kernel has re-read it, which only
+                        happens across a reboot. Missing -> either stage1 never ran here,
+                        or it ran and the box has not been rebooted since.
+      statfs(/data)     the size of the filesystem Android actually came up on.
+
+    The second one is the one that matters. stage1 arms the reformat by writing
+    'boot-recovery' into the BCB -- the same 32-byte field of `misc` that `adb reboot
+    bootloader` overwrites with 'bootonce-bootloader'. That field is NOT self-clearing on
+    this SoC (a stale 'bootonce-bootloader' is still sitting in it on the dev stick), so
+    anything that detours through the bootloader between stage1 and its reboot silently
+    disarms the reformat. Android then comes back up on the OLD, larger f2fs living on the
+    new, SMALLER userdata: it mounts happily and corrupts itself the moment usage crosses
+    the partition end. A healthy reformatted /data is always smaller than its partition, so
+    a filesystem bigger than the partition it sits on IS that failure -- and it is the one
+    state stage1b must refuse to build on top of.
+    """
+    print("-- post-stage1 state (read-only, no root needed) --")
+    byname = sh(serial, "ls /dev/block/by-name/").split()
+    if not {"CE_FLASH", "CE_STORAGE"} <= set(byname):
+        sys.exit(
+            "CE_FLASH / CE_STORAGE are not present on this device.\n"
+            "The carved partition table is not live, which means one of:\n"
+            "  * stage1 has not been run on this unit    -> run: python install.py stage1 --yes\n"
+            "  * stage1 ran but the box has NOT REBOOTED -> reboot it (adb reboot), let\n"
+            "    recovery reformat userdata and Android finish its first-boot setup, then\n"
+            "    re-run stage1b.\n"
+            "Refusing to install Magisk onto a device that is not in the post-stage1 state "
+            "(a pending reformat would erase it again anyway).")
+    print(f"  CE_FLASH + CE_STORAGE present -> carve is live (the reboot happened)")
+
+    # statfs: total blocks x block size == the size of the fs Android is running on.
+    parts = sh(serial, "stat -f -c '%b %S' /data").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        print("  WARNING: could not read the size of /data (stat -f gave "
+              f"{' '.join(parts) or '(nothing)'}) -- cannot confirm the userdata reformat "
+              "took. Continuing on the CE_* check alone.")
+        return
+    fs = int(parts[0]) * int(parts[1])
+    cap = dev.carved_userdata_bytes
+    if fs > cap:
+        sys.exit(
+            f"USERDATA WAS NEVER REFORMATTED -- this device is corrupting itself.\n"
+            f"  /data filesystem: {fs:,} B\n"
+            f"  userdata partition: {cap:,} B  ({dev.name}, carved)\n"
+            f"The filesystem is LARGER than the partition holding it. stage1 shrank "
+            f"userdata and armed a recovery reformat to resize the filesystem to match, "
+            f"but that reformat did not run -- most likely the armed BCB was overwritten "
+            f"by a reboot into the bootloader (`adb reboot bootloader` writes the same "
+            f"field).\nAndroid will keep running on it and will hit I/O errors as soon as "
+            f"usage crosses the partition end.\n\n"
+            f"Re-arm the reformat and reboot (this WIPES /data again -- you will redo the "
+            f"Android setup, then re-run stage1b):\n"
+            f"    python installer/finish_install.py --serial {serial} --arm-reformat --yes\n"
+            f"    adb -s {serial} reboot")
+    print(f"  /data is {fs:,} B inside a {cap:,} B partition -> the reformat ran")
+
+
 # ---- stage 1b: re-install Magisk APK after the stage1 factory reset ---------
 def stage1b(a):
     print("== stage1b: re-install Magisk APK (factory reset wiped userdata) ==")
     print("  (the active slot's init_boot is still patched -- no fastboot needed)")
+
+    # Identify the unit and confirm stage1's reboot landed BEFORE touching anything.
+    # Pre-root, so no eMMC-size cross-check (read_sectors=None), exactly as stage_magisk
+    # does -- and the carve checks that follow are a hardware fact of their own.
+    dev = devices.identify(lambda p: getprop(a.serial, p), None,
+                           require_layout=True, log=print)
+    check_post_stage1_state(a.serial, dev)
 
     install_magisk_apk(a.serial, fatal=True)
     print()
@@ -506,18 +609,13 @@ def stage1b(a):
     print("    adb shell su -c id   # should return uid=0(root)")
     print()
     input("  Press Enter here once uid=0 is confirmed ...")
-    try:
-        r = subprocess.run(["adb", "-s", a.serial, "exec-out", "su -c 'id'"],
-                           capture_output=True, timeout=10)
-        root_out = r.stdout.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired:
-        root_out = ""
+    root_out, _ = su(a.serial, "id", timeout=10)
     if "uid=0" in root_out:
         print("  Root confirmed.")
     else:
         print(f"  WARNING: could not confirm root ({root_out.strip() or 'no output'}).")
         print("  Check Magisk is set up, then continue -- stage2 will fail if root is missing.")
-    print(f"\nstage1b done. Run stage2 now:")
+    print("\nstage1b done. Run stage2 now:")
     print("  python install.py stage2")
     return 0
 
