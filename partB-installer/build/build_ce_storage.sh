@@ -41,5 +41,10 @@ echo "  sha256=$(sha256sum "$IMG" | cut -c1-16)"
 # ce_storage.img.gz -- the form the installer streams. Same generation as the raw, always.
 # Atomic mv so an interrupted gzip leaves the .tmp, not a truncated-but-flashable .gz.
 echo "== gzip -> ce_storage.img.gz =="
-gzip -6 -c "$IMG" > "$IMG.gz.tmp" && mv -f "$IMG.gz.tmp" "$IMG.gz"
+# -n: do not put the source filename or a TIMESTAMP in the gzip header. Without it the
+# header's mtime field changes on every build, so ce_storage.img.gz -- which IS git-tracked
+# -- came out as a different file each time even though the image inside it is byte-identical
+# (that is the whole point of the fixed UUID / hash_seed / E2FSPROGS_FAKE_TIME above). The
+# effort to make the image reproducible was being undone four bytes into the wrapper.
+gzip -n -6 -c "$IMG" > "$IMG.gz.tmp" && mv -f "$IMG.gz.tmp" "$IMG.gz"
 echo "ce_storage.img.gz: $(stat -c %s "$IMG.gz") B"

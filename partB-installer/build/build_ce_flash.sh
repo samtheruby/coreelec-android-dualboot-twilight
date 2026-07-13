@@ -121,5 +121,9 @@ echo "ce_flash.img built: $sz B ($((sz/1024/1024)) MiB)  sha256=$(sha256sum "$IM
 # Written here, from THIS raw, so raw and gz are always the same generation. Atomic mv:
 # an interrupted gzip leaves the .tmp, never a truncated .gz that still looks flashable.
 echo "== gzip -> ce_flash.img.gz =="
-gzip -6 -c "$IMG" > "$IMG.gz.tmp" && mv -f "$IMG.gz.tmp" "$IMG.gz"
+# -n: no source filename, no timestamp in the gzip header -- see build_ce_storage.sh. This
+# image is not byte-reproducible anyway (mtools stamps each directory entry from the clock),
+# so -n does not make the .gz stable here; it is set for consistency, and so that the only
+# thing that ever moves is the payload.
+gzip -n -6 -c "$IMG" > "$IMG.gz.tmp" && mv -f "$IMG.gz.tmp" "$IMG.gz"
 echo "ce_flash.img.gz:    $(stat -c %s "$IMG.gz") B"
