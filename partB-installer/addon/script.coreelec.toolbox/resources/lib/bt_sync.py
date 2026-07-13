@@ -7,6 +7,7 @@
 # keys (LE_KEY_PENC/PID) to BlueZ format, and write them under the adapter's store.
 # No MAC override is needed when CoreELEC + Android share the chip's efuse BT MAC.
 import os
+import time
 import subprocess
 import configparser
 
@@ -48,6 +49,44 @@ def live_adapter_mac():
     except Exception:
         pass
     return None
+
+
+def adapter_powered():
+    """True while the controller is powered (HCI_UP). Kodi's Bluetooth settings
+    report 'no adapter' when it is not."""
+    try:
+        return "UP RUNNING" in subprocess.check_output(["hciconfig"], text=True)
+    except Exception:
+        return False
+
+
+def stop_bluetooth():
+    """Stop bluetoothd and power the controller down before touching its store.
+
+    bluetoothd caches the store in memory, so bonds written under a live daemon can
+    be ignored or rewritten. Powering down matters too: the kernel REJECTS Set
+    Privacy on a powered controller, so bluetoothd can only adopt the imported IRK
+    if it finds the controller down at startup."""
+    subprocess.run(["systemctl", "stop", "bluetooth"], check=False)
+    subprocess.run(["btmgmt", "power", "off"], check=False)
+
+
+def start_bluetooth():
+    """Start bluetoothd and make sure the controller comes back powered.
+
+    bluetooth.service has TimeoutStopSec=1s, so a busy bluetoothd (mid LE connect)
+    is SIGKILLed on stop; the half-torn-down mgmt state has been seen to leave the
+    controller powered off for good -- Kodi then shows no Bluetooth adapter at all.
+    AutoEnable normally powers it back on; if it did not, do it ourselves."""
+    subprocess.run(["systemctl", "start", "bluetooth"], check=False)
+    for _ in range(15):
+        if adapter_powered():
+            return True
+        time.sleep(1)
+    log("bluetoothd left the controller powered off -- powering it on")
+    subprocess.run(["btmgmt", "power", "on"], check=False)
+    time.sleep(1)
+    return adapter_powered()
 
 
 def is_input_remote(dev):
@@ -108,8 +147,8 @@ def ensure_local_identity(adapter, cfg):
     oneshot unit bind-mounts before bluetooth.service starts (bluetooth.service
     itself is stripped to CAP_NET_* and cannot mount).
 
-    Returns True if anything changed (caller should restart bluetooth)."""
-    changed = False
+    Call with bluetoothd stopped and the controller down (see stop_bluetooth):
+    the kernel only accepts Set Privacy on an unpowered controller."""
     irk = cfg["Adapter"].get("LE_LOCAL_KEY_IRK", "").strip().upper() \
         if cfg.has_section("Adapter") else ""
     if len(irk) == 32:
@@ -123,7 +162,6 @@ def ensure_local_identity(adapter, cfg):
             with open(ident, "w") as f:
                 f.write(want)
             os.chmod(ident, 0o600)
-            changed = True
             log("installed Android local IRK as adapter identity")
 
     if not os.path.exists(MAIN_CONF_OVR) or \
@@ -136,7 +174,6 @@ def ensure_local_identity(adapter, cfg):
                 conf = conf.replace("[General]", "[General]\nPrivacy = device", 1)
         with open(MAIN_CONF_OVR, "w") as f:
             f.write(conf)
-        changed = True
         log("wrote privacy-enabled main.conf override")
 
     if not os.path.exists(PRIVACY_UNIT):
@@ -158,10 +195,8 @@ def ensure_local_identity(adapter, cfg):
                 "WantedBy=multi-user.target\n")
         subprocess.run(["systemctl", "daemon-reload"], check=False)
         subprocess.run(["systemctl", "enable", "bluetooth-privacy.service"], check=False)
-        changed = True
         log("installed + enabled bluetooth-privacy.service")
     subprocess.run(["systemctl", "start", "bluetooth-privacy.service"], check=False)
-    return changed
 
 
 def run():
@@ -196,7 +231,8 @@ def run():
                 "Remotes may not reconnect. Import anyway?"):
             return
 
-    identity_changed = ensure_local_identity(adapter, cfg)
+    stop_bluetooth()
+    ensure_local_identity(adapter, cfg)
 
     imported, skipped = [], []
     for sec in cfg.sections():
@@ -223,11 +259,12 @@ def run():
         imported.append(name)
         log(f"imported {name} ({sec.upper()})")
 
-    if imported or identity_changed:
-        subprocess.run(["systemctl", "restart", "bluetooth"], check=False)
+    powered = start_bluetooth()
 
     msg = ("Imported -- now work in CoreELEC:\n - " + "\n - ".join(imported)) if imported \
         else "No remotes were imported."
     if skipped:
         msg += "\n\nSkipped (not input remotes):\n - " + "\n - ".join(skipped)
+    if not powered:
+        msg += "\n\n[COLOR red]The Bluetooth adapter did not come back on. Reboot.[/COLOR]"
     xbmcgui.Dialog().ok(NAME, msg)
