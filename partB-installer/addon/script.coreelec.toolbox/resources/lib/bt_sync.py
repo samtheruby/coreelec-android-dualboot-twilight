@@ -199,6 +199,88 @@ def ensure_local_identity(adapter, cfg):
     subprocess.run(["systemctl", "start", "bluetooth-privacy.service"], check=False)
 
 
+def existing_ltk(dest):
+    """The LTK CoreELEC already holds for this device, or None if it has no bond."""
+    p = os.path.join(dest, "info")
+    if not os.path.exists(p):
+        return None
+    c = configparser.ConfigParser(strict=False)
+    c.optionxform = str
+    try:
+        c.read(p)
+    except Exception:
+        return None
+    # a native CE bond stores the peripheral's key under Peripheral/SlaveLongTermKey
+    # (LE Secure Connections); an imported legacy bond uses LongTermKey.
+    for sec in ("LongTermKey", "PeripheralLongTermKey", "SlaveLongTermKey"):
+        if c.has_section(sec) and c[sec].get("Key"):
+            return c[sec]["Key"].strip().upper()
+    return None
+
+
+def _verdict(trace, mac):
+    """Read the encryption result for ONE device out of an btmon trace.
+
+    btmon shows every device on the controller, so a verdict may not be taken from the trace
+    as a whole -- another remote encrypting successfully in the same window would otherwise
+    read as our success. Scope it to the Encryption Change event carrying our address:
+
+        > HCI Event: Encryption Change (0x08) plen 4
+                Status: PIN or Key Missing (0x06)
+                Handle: 16 (LE-ACL) Address: C0:5D:39:AB:7B:49 (...)
+                Encryption: Disabled (0x00)
+    """
+    lines = trace.splitlines()
+    for i, ln in enumerate(lines):
+        if "Encryption Change" not in ln:
+            continue
+        block = "\n".join(lines[i:i + 5]).upper()
+        if mac.upper() not in block:
+            continue
+        if "PIN OR KEY MISSING" in block:
+            return "stale"
+        if "ENCRYPTION: ENABLED" in block:
+            return "ok"
+    return "unreachable"
+
+
+def verify_bond(mac):
+    """Connect once and watch the link. -> "ok" | "stale" | "unreachable".
+
+    The failure this catches is invisible from the files: a BLE remote remembers ONE
+    pairing per host, and both OSes share this box's BT address -- so if the remote was
+    re-paired anywhere else after Android stored its keys, the export we just imported is
+    dead. The link then comes up and the remote REJECTS the LTK:
+
+        LE Enhanced Connection Complete -- Status: Success
+        Encryption Change -- Status: PIN or Key Missing (0x06)
+        Disconnect -- Reason: Authentication Failure (0x05)
+
+    ...forever, several times a second. Nothing in BlueZ's own logs says "your key is
+    stale", so read it off the HCI link itself with btmon.
+    """
+    try:
+        mon = subprocess.Popen(["btmon"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               text=True, errors="replace")
+    except OSError:
+        return "unreachable"                 # no btmon -- cannot tell, do not lie about it
+    try:
+        subprocess.run(["bluetoothctl", "connect", mac], check=False, timeout=30,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)                        # let the encryption result land in the trace
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        mon.terminate()
+    try:
+        trace = mon.communicate(timeout=5)[0] or ""
+    except subprocess.TimeoutExpired:
+        mon.kill()
+        trace = ""
+
+    return _verdict(trace, mac)              # "unreachable" == never advertised/asleep/out of range
+
+
 def run():
     if not os.path.exists(EXPORT):
         xbmcgui.Dialog().ok(
@@ -231,10 +313,9 @@ def run():
                 "Remotes may not reconnect. Import anyway?"):
             return
 
-    stop_bluetooth()
-    ensure_local_identity(adapter, cfg)
-
-    imported, skipped = [], []
+    # Plan the import first, while bluetoothd is still up: a conflict has to be answered
+    # BEFORE we take Bluetooth down, or the user may have no working input left to answer with.
+    plan, skipped, conflicts = [], [], []
     for sec in cfg.sections():
         d = cfg[sec]
         if not (d.get("LE_KEY_PENC") and d.get("LE_KEY_PID")):
@@ -252,19 +333,76 @@ def run():
             skipped.append(name)
             log(f"skipped {name} ({sec.upper()}): malformed LE keys")
             continue
-        dest = os.path.join(BLUEZ_BASE, adapter, sec.upper())
+        mac = sec.upper()
+        dest = os.path.join(BLUEZ_BASE, adapter, mac)
+        held = existing_ltk(dest)
+        if held and held != penc[:32].upper():
+            conflicts.append(name)
+        plan.append((name, mac, dest, info))
+
+    if not plan:
+        msg = "No remotes were imported."
+        if skipped:
+            msg += "\n\nSkipped (not input remotes):\n - " + "\n - ".join(skipped)
+        xbmcgui.Dialog().ok(NAME, msg)
+        return
+
+    if conflicts:
+        # A BLE remote remembers ONE pairing per host, and both OSes share this box's BT
+        # address -- so the remote holds the keys of whichever OS paired it LAST. Importing
+        # Android's keys over a newer CoreELEC pairing kills a working remote.
+        if not xbmcgui.Dialog().yesno(
+                NAME,
+                "CoreELEC already has its own pairing for:\n - " + "\n - ".join(conflicts) +
+                "\n\nA remote remembers only ONE pairing for this box (both OSes share its "
+                "Bluetooth address), so importing REPLACES it. Do this only if Android is "
+                "where you paired the remote [B]last[/B] -- otherwise the imported keys are "
+                "stale and the remote will connect, then drop, forever.\n\nReplace anyway?"):
+            return
+
+    stop_bluetooth()
+    ensure_local_identity(adapter, cfg)
+    imported = []
+    for name, mac, dest, info in plan:
         os.makedirs(dest, exist_ok=True)
         with open(os.path.join(dest, "info"), "w") as f:
             f.write(info)
-        imported.append(name)
-        log(f"imported {name} ({sec.upper()})")
-
+        imported.append((name, mac))
+        log(f"imported {name} ({mac})")
     powered = start_bluetooth()
 
-    msg = ("Imported -- now work in CoreELEC:\n - " + "\n - ".join(imported)) if imported \
-        else "No remotes were imported."
+    msg = "Imported:\n - " + "\n - ".join(n for n, _ in imported)
     if skipped:
         msg += "\n\nSkipped (not input remotes):\n - " + "\n - ".join(skipped)
     if not powered:
         msg += "\n\n[COLOR red]The Bluetooth adapter did not come back on. Reboot.[/COLOR]"
-    xbmcgui.Dialog().ok(NAME, msg)
+        xbmcgui.Dialog().ok(NAME, msg)
+        return
+
+    # Prove the imported keys actually work, instead of leaving the user to discover a
+    # connect/drop loop by themselves.
+    if not xbmcgui.Dialog().yesno(NAME, msg + "\n\nTest a remote now to prove the keys work?",
+                                  yeslabel="Test", nolabel="Skip"):
+        return
+    for name, mac in imported:
+        xbmcgui.Dialog().ok(NAME, f"[B]{name}[/B]\n\nPress a button on the remote now to wake it, "
+                                  "then select OK. This takes up to 30 seconds.")
+        res = verify_bond(mac)
+        log(f"verify {name} ({mac}): {res}")
+        if res == "ok":
+            xbmcgui.Dialog().ok(NAME, f"[B]{name}[/B]: connected and encrypted.\n\n"
+                                      "The import works -- the remote will reconnect on its own "
+                                      "from now on.")
+        elif res == "stale":
+            xbmcgui.Dialog().ok(
+                NAME,
+                f"[COLOR red][B]{name}[/B]: the remote REJECTED the imported key.[/COLOR]\n\n"
+                "Android's export is stale -- the remote has been re-paired since (pairing it "
+                "in CoreELEC does this too), and a remote only remembers its LAST pairing.\n\n"
+                "Fix: pair the remote in [B]Android[/B] again, boot Android once so the export "
+                "refreshes, then run this import again. Do not pair it in CoreELEC.")
+        else:
+            xbmcgui.Dialog().ok(NAME, f"[B]{name}[/B]: could not reach the remote (asleep or out "
+                                      "of range), so the keys are untested. Press a button on it "
+                                      "and give it a moment; if it never connects, run this test "
+                                      "again.")
