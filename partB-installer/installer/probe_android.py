@@ -14,11 +14,17 @@ Answers the installer's open questions:
 Writes a report to partB-installer/payload/android_probe.txt
 NOTHING is written to the device.
 
-Usage: python probe_android.py [adb_serial]   (default = first network device)
+Usage: python probe_android.py [adb_serial]   (omit to auto-pick the only USB device)
 """
 import subprocess, sys, os, zlib, struct
 
-SERIAL = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.195:41243"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import adb_serial  # noqa: E402
+
+# USB only, like every other script here -- this used to default to a WIRELESS adb serial
+# (192.168.1.195:41243), a leftover from early development and the one transport this
+# project deliberately does not support.
+SERIAL = adb_serial.resolve(sys.argv[1] if len(sys.argv) > 1 else None)
 DEST = os.path.join(os.path.dirname(__file__), "..", "payload")
 os.makedirs(DEST, exist_ok=True)
 

@@ -18,13 +18,16 @@ Steps:
 Setting IDs/values verified against CoreELEC's Kodi tree (CoreELEC/xbmc, Kodi 22):
   addons.unknownsources (boolean); addons.updatemode (integer: 0=OFFICIAL_ONLY, 1=ANY_REPOSITORY).
 
-  python deploy_toolbox_addon.py --host 192.168.1.195 [--restart] [--no-configure]
+  python deploy_toolbox_addon.py --host <coreelec-ip> [--restart] [--no-configure]
 
 Needs paramiko (pip install paramiko).
 """
-import argparse, glob, json, os, sys, time
+import argparse, glob, hashlib, json, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "build"))
+import bundle  # noqa: E402  -- SHA256SUMS.txt check on the addon zip we upload
+
 ADDON_ID = "script.coreelec.toolbox"
 ADDONS_DIR = "/storage/.kodi/addons"
 GUISETTINGS = "/storage/.kodi/userdata/guisettings.xml"
@@ -147,7 +150,9 @@ def configure_kodi(cli, sh, web_pass=WEB_PASS, candidates=("kodi", "123")):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.1.195")
+    # No default: this SSHes in as root and writes /storage. A default IP means a bare run
+    # reaches out to whatever machine happens to hold it on the user's LAN.
+    ap.add_argument("--host", required=True, help="CoreELEC IP/hostname")
     ap.add_argument("--user", default="root")
     ap.add_argument("--pass", dest="pw", default="coreelec")
     ap.add_argument("--restart", action="store_true",
@@ -166,6 +171,8 @@ def main():
     zpath = find_zip()
     if not zpath:
         sys.exit(f"{ADDON_ID}-*.zip not found (build it / place it next to the installer)")
+    bundle.verify(zpath)                      # vs SHA256SUMS.txt, when the bundle ships one
+    want = hashlib.sha256(open(zpath, "rb").read()).hexdigest()
 
     cli = paramiko.SSHClient()
     cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -178,15 +185,45 @@ def main():
         o.channel.recv_exit_status()
         return out + e.read().decode(errors="replace")
 
+    remote_zip = "/storage/_toolbox_addon.zip"
     sftp = cli.open_sftp()
-    sftp.put(zpath, "/storage/_toolbox_addon.zip")
+    sftp.put(zpath, remote_zip)
     sftp.close()
-    print(f"  uploaded {os.path.basename(zpath)}")
 
-    out = sh(f"mkdir -p {ADDONS_DIR} && unzip -oq /storage/_toolbox_addon.zip -d {ADDONS_DIR} "
-             f"&& rm -f /storage/_toolbox_addon.zip && echo EXTRACT_OK")
+    # Hash the zip AS IT LANDED, before unpacking it into Kodi's addon tree.
+    #
+    # Not for transit corruption -- SSH authenticates every packet, and paramiko's
+    # put(confirm=True) already stats the result and raises on a size mismatch. This is
+    # about the state of the box: a full /storage, a filesystem that did not commit, a
+    # leftover _toolbox_addon.zip from an interrupted run. It costs one sha256sum of a
+    # small file, and this is the one thing we upload that then gets unpacked into a
+    # directory Kodi executes code from -- so it is worth knowing the bytes are ours.
+    got = sh(f"sha256sum {remote_zip}").split()
+    if not got or got[0].lower() != want:
+        sh(f"rm -f {remote_zip}")
+        cli.close()
+        sys.exit(f"the addon zip did not survive the upload:\n"
+                 f"  PC:  {want}\n  box: {got[0] if got else '(no output)'}\n"
+                 f"Nothing was extracted. Re-run.")
+    print(f"  uploaded {os.path.basename(zpath)}  sha256 OK ({want[:16]})")
+
+    out = sh(f"mkdir -p {ADDONS_DIR} && unzip -oq {remote_zip} -d {ADDONS_DIR} "
+             f"&& rm -f {remote_zip} && echo EXTRACT_OK")
     if "EXTRACT_OK" not in out:
+        sh(f"rm -f {remote_zip}")
         cli.close(); sys.exit(f"extract failed: {out}")
+
+    # Confirm the addon actually unpacked, by looking for the two files Kodi needs to load
+    # it at all. Deliberately NOT a version-string check: parsing a version out of addon.xml
+    # with sed is fragile (quote style, attribute order), and an unreadable version would
+    # then abort a perfectly good install. Existence is the fact that matters; the version
+    # below is only for the log, and '?' there is not a failure.
+    need = " ".join(f"{ADDONS_DIR}/{ADDON_ID}/{f}" for f in ("addon.xml", "default.py"))
+    if "FILES_OK" not in sh(f"[ -f {ADDONS_DIR}/{ADDON_ID}/addon.xml ] && "
+                            f"[ -f {ADDONS_DIR}/{ADDON_ID}/default.py ] && echo FILES_OK"):
+        cli.close()
+        sys.exit(f"the zip extracted, but {need} are not both present -- the addon did not "
+                 f"unpack correctly and Kodi will not see it.")
     ver = sh(f"grep -v '<?xml' {ADDONS_DIR}/{ADDON_ID}/addon.xml | "
              "sed -n 's/.*version=\"\\([0-9.]*\\)\".*/\\1/p' | head -1").strip()
     print(f"  extracted -> {ADDONS_DIR}/{ADDON_ID}  (version {ver or '?'})")

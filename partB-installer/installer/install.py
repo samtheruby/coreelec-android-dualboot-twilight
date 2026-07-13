@@ -63,7 +63,13 @@ import install_state  # noqa: E402  -- the boot default stage1 recorded, for sta
 
 
 def run(script, *args):
+    # Flush our own buffered output BEFORE the child writes any of its own. Piped to a file,
+    # Python block-buffers stdout while the subprocess inherits the fd and streams straight
+    # through -- so in a captured log every "-- doing X --" header landed AFTER the output it
+    # was introducing. Fine on a terminal, actively misleading in the log you debug from.
+    sys.stdout.flush()
     r = subprocess.run([PY, os.path.join(HERE, script), *args])
+    sys.stdout.flush()
     return r.returncode
 
 
@@ -746,23 +752,45 @@ def stage2a(a):
 
 # ---- stage 3: CoreELEC-side setup (device in CoreELEC, SSH/--host) ------------
 def stage3(a):
+    """Everything here is a convenience layer on top of a dual-boot that already works.
+
+    Nothing in this stage is on the path back to Android: with --default android a normal
+    reboot IS Android, and with --default coreelec you get there via CoreELEC's own
+    'reboot to eMMC/nand'. Both are the env gate, written in stage1 and re-asserted in
+    stage2. So no step here is worth aborting the stage for -- a failure costs the user a
+    feature, not their box. Each one reports, and stage3 exits non-zero if any of them
+    failed, rather than reporting the first one's result as the whole stage's.
+    """
     print("== stage3: CoreELEC-side setup (device booted into CoreELEC, SSH) ==")
     if not a.host:
         sys.exit("stage3 needs --host <coreelec-ip> (boot into CoreELEC, enable SSH)")
+    pw = ["--pass", a.ssh_pass] if a.ssh_pass else []
+    failed = []
+
     print("-- CoreELEC Toolbox addon: BT-sync / boot-default / WiFi-MAC [generic] --")
-    rc = run("deploy_toolbox_addon.py", "--host", a.host)
+    if run("deploy_toolbox_addon.py", "--host", a.host, *pw) != 0:
+        failed.append("Toolbox addon (BT sync / boot-default / WiFi-MAC)")
+
     print("-- Kodi sources: PM4K + jamal2362 [generic] --")
-    run("deploy_kodi_sources.py", "--host", a.host)
+    if run("deploy_kodi_sources.py", "--host", a.host, *pw) != 0:
+        failed.append("Kodi sources (PM4K + jamal2362)")
+
     if a.no_keymap:
         print("-- Xiaomi remote keymap: skipped (--no-keymap) --")
     else:
         tag = "forced (--xiaomi)" if a.xiaomi else "auto-detect"
         print(f"-- Xiaomi remote keymap [{tag}] --")
-        km = ["--host", a.host] + ([] if a.xiaomi else ["--auto"])
-        run("deploy_remote_keymap.py", *km)
+        km = ["--host", a.host] + pw + ([] if a.xiaomi else ["--auto"])
+        if run("deploy_remote_keymap.py", *km) != 0:
+            failed.append("Xiaomi remote keymap")
+
     print("\nstage3 done. Install PM4K (script.plexmod) / TinyPPI (script.tinyppi) from the "
           "new sources:\n  Add-ons > Install from zip file > <source>.")
-    return rc
+    for f in failed:
+        print(f"  WARNING: {f} did NOT complete -- re-run stage3, or the script on its own.")
+    if failed:
+        print("  (the dual-boot itself is unaffected -- these are CoreELEC-side extras)")
+    return 1 if failed else 0
 
 
 # ---- verify: layout/env readiness (Android, read-only) -----------------------
@@ -780,6 +808,10 @@ def main():
     ap.add_argument("--serial", help="adb serial for the Android stages (USB device id); "
                     "omit to auto-pick the only attached device")
     ap.add_argument("--host", help="CoreELEC IP (stage3; device booted into CoreELEC)")
+    ap.add_argument("--ssh-pass", dest="ssh_pass", default="",
+                    help="stage3: CoreELEC root SSH password (default: the scripts' own "
+                         "'coreelec'). Pass this if you changed it -- without it stage3 "
+                         "could not reach a box with a non-default password at all.")
     ap.add_argument("--yes", action="store_true", help="perform destructive stage1 writes")
     # default=None, NOT "android": stage2 has to tell "the user asked for android" apart
     # from "the user said nothing", because in the second case the right answer is whatever
