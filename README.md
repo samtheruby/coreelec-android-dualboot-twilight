@@ -56,7 +56,9 @@ With the device connected by USB, run:
 ```
 python installer/install.py stage_unlock --yes
 ```
-The device restarts into fastboot mode and shows the **Mi logo**. This step checks first; if your device is already unlocked it just reboots and moves on. When it unlocks, the device wipes itself and restarts into first-time setup.
+This step checks your device before it touches it. If the bootloader is already unlocked it says so and stops there, leaving the device alone — skip ahead to step 4. If **OEM unlocking** is switched off it tells you, because the unlock cannot work without it. Otherwise the device restarts into fastboot mode and shows the **Mi logo**, unlocks, wipes itself, and restarts into first-time setup.
+
+Without `--yes` it performs those same checks and tells you what it would do, without changing anything.
 
 After it restarts, set the device up again:
 1. Finish first-time setup (you can skip signing in to Google).

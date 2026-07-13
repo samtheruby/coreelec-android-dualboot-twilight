@@ -37,18 +37,19 @@ any CoreELEC box -- see deploy_toolbox_addon.py / deploy_kodi_sources.py.
 Usage (device on USB; with one device attached --serial auto-picks, else add
 --serial <serial>):
   python install.py stage_unlock --yes        # unlock bootloader (wipes device)
-  python install.py stage_magisk              # auto-find init_boot_patched.img
-  python install.py stage_magisk --magisk-img <path>
+  python install.py stage_magisk              # bundled image for the identified unit
+  python install.py stage_magisk --magisk-img <path>   # your own patched init_boot
   python install.py stage1  --yes
   python install.py stage2
   python install.py stage2a
   python install.py stage3  --host <coreelec-ip>          # device booted in CoreELEC
   python install.py all     --yes             # stage_magisk+stage1, guides the rest
 """
-import argparse, os, subprocess, sys
+import argparse, glob, hashlib, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ART = os.path.join(HERE, "..", "artifacts")
+MAGISK_DIR = os.path.abspath(os.path.join(HERE, "..", "magisk"))
 PY = sys.executable
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import devices  # noqa: E402  -- stick/box discrimination registry
@@ -69,25 +70,160 @@ def su(serial, cmd):
     return r.stdout.decode("utf-8", "replace"), r.returncode
 
 
+def getprop(serial, name):
+    """One Android property, as a stripped string ('' if unset). No root needed."""
+    return adb(serial, "shell", "getprop", name, capture_output=True, text=True).stdout.strip()
+
+
+# ---- fastboot helpers (shared by stage_unlock and stage_magisk) ---------------
+def fastboot_devices(fb):
+    """Serials of the attached fastboot devices, [] if none. `fastboot devices` prints
+    one '<serial>\tfastboot' line per device -- no header line (that's adb)."""
+    try:
+        r = subprocess.run(fb + ["devices"], capture_output=True, text=True)
+    except FileNotFoundError:
+        sys.exit("fastboot not found on PATH -- install Android platform-tools")
+    return [ln.split()[0] for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def wait_for_fastboot(fb, timeout=60):
+    """Block until a fastboot device appears (after `adb reboot bootloader`), or exit.
+
+    Two units in fastboot at once (typically one stranded there by an earlier run) is
+    ambiguous, and the fastboot commands that follow are unqualified -- they would either
+    fail or hit the wrong box. Guessing which unit to flash is not an option; the caller
+    must say which with --fastboot-serial. Same rule adb_serial.resolve applies on the
+    adb side.
+    """
+    bound = "-s" in fb                  # --fastboot-serial given -> every command is qualified
+    print(f"  waiting for fastboot device (up to {timeout} s) ...")
+    for _ in range(timeout):
+        devs = fastboot_devices(fb)
+        if devs:
+            if len(devs) > 1 and not bound:
+                sys.exit(f"{len(devs)} fastboot devices attached ({', '.join(devs)}) -- "
+                         f"cannot tell which one to flash. Unplug the others, or name the "
+                         f"target with --fastboot-serial <serial>.")
+            print(f"  fastboot: {devs[0] if not bound else fb[fb.index('-s') + 1]}")
+            return
+        time.sleep(1)
+    sys.exit(f"fastboot device did not appear within {timeout} s -- "
+             "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
+
+
+# ---- Magisk helpers (shared by stage_magisk and stage1b) ----------------------
+def install_magisk_apk(serial, fatal):
+    """Install the bundled Magisk manager APK over adb; True if it went in.
+
+    `fatal` distinguishes the two callers: for stage1b the APK IS the stage, so a failure
+    is fatal; for stage_magisk the fastboot flash is the stage, so a failed APK install is
+    a warning and the root check at the end of that stage is where the human finds out.
+    """
+    apks = sorted(glob.glob(os.path.join(MAGISK_DIR, "Magisk*.apk")) +
+                  glob.glob(os.path.join(ART, "Magisk*.apk")))
+    if not apks:
+        msg = "no Magisk*.apk found in magisk/ or artifacts/"
+        if fatal:
+            sys.exit(msg)
+        print(f"  ({msg} -- skipping APK install)")
+        return False
+    if len(apks) > 1:
+        # The pick is a plain lexicographic last, which is NOT a version sort
+        # (Magisk-v9.apk would sort after Magisk-v30.apk). One APK is the expected case,
+        # so say something rather than silently choosing.
+        print(f"  WARNING: {len(apks)} Magisk APKs present; using "
+              f"{os.path.basename(apks[-1])}. Keep exactly one.")
+    apk = apks[-1]
+    print(f"  installing {os.path.basename(apk)} ...")
+    r = adb(serial, "install", "-r", apk, capture_output=True)
+    out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+    if r.returncode != 0:
+        if fatal:
+            sys.exit(f"  APK install failed: {out}")
+        print(f"  WARNING: APK install failed: {out}")
+        return False
+    print("  Magisk APK installed OK")
+    return True
+
+
+def check_boot_image(path):
+    """Refuse anything that is not an Android boot image, before it reaches init_boot.
+
+    fastboot writes whatever bytes it is handed. A zip, a truncated download or a stock
+    firmware payload lands on a boot-critical partition and the unit stops booting. The
+    header magic plus a plausible size is the cheapest gate there is on the one
+    irreversible write this stage makes -- and the only one the --magisk-img path gets,
+    since a hand-supplied image skips the bundled-image checks.
+    """
+    n = os.path.getsize(path)
+    with open(path, "rb") as f:
+        magic = f.read(8)
+    if magic != b"ANDROID!":
+        sys.exit(f"{os.path.basename(path)} is not an Android boot image (header magic "
+                 f"{magic!r}, expected b'ANDROID!') -- REFUSING to flash it to init_boot.")
+    if not 64 * 1024 <= n <= 64 * devices.MIB:
+        sys.exit(f"{os.path.basename(path)} is {n:,} B, which is not a plausible init_boot "
+                 f"image -- REFUSING to flash it.")
+
+
+def verify_bundled_sha256(path):
+    """Verify `path` against the bundle's SHA256SUMS.txt, when it lists that file.
+
+    make_dist writes SHA256SUMS.txt into every dist bundle, covering magisk/*.img. A bad
+    unzip or a half-copied image is exactly the failure this catches, and 8 MiB of it is
+    about to be written to a boot-critical partition. No-ops (does not fail) when there is
+    no manifest or the file is not in it -- e.g. a source checkout, or a --magisk-img the
+    user patched themselves. That is a real gap, not a hidden one: the manifest can only
+    vouch for what shipped in the bundle.
+    """
+    sums = os.path.abspath(os.path.join(HERE, "..", "SHA256SUMS.txt"))
+    if not os.path.exists(sums):
+        return
+    rel = os.path.relpath(os.path.abspath(path), os.path.dirname(sums)).replace(os.sep, "/")
+    want = None
+    with open(sums, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            p = ln.split()
+            if len(p) == 2 and p[1].lstrip("*") == rel:   # sha256sum marks binary as '*path'
+                want = p[0].lower()
+                break
+    if want is None:
+        return
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    got = h.hexdigest()
+    if got != want:
+        sys.exit(f"SHA-256 MISMATCH for {rel}\n"
+                 f"  SHA256SUMS.txt says: {want}\n"
+                 f"  the file on disk is: {got}\n"
+                 f"The bundle is corrupt or the image was modified. REFUSING to flash it -- "
+                 f"re-download / re-extract the bundle.")
+    print(f"  sha256 OK ({rel})")
+
+
 # ---- stage_unlock: unlock the bootloader (fastboot flashing unlock) ----------
 def stage_unlock(a):
     """Unlock the bootloader so stage_magisk can flash a patched init_boot.
 
     Most units ship with a LOCKED bootloader that was never unlocked. fastboot
     refuses to flash on a locked bootloader, so stage_magisk fails. This stage
-    reboots to fastboot, checks the lock state via `getvar unlocked`, and (if
-    locked) runs `flashing unlock` + `flashing unlock_critical`.
+    reboots a locked unit to fastboot, re-checks the lock state there via
+    `getvar unlocked`, and runs `flashing unlock` + `flashing unlock_critical`.
 
     DESTRUCTIVE: unlocking triggers a factory reset. After this stage the device
     reboots and must be re-setup from scratch (skip Google sign-in / re-enable
     ADB) BEFORE running stage_magisk.
-    """
-    import time
-    print("== stage_unlock: unlock the bootloader (fastboot flashing unlock) ==")
-    print("  A Mi-logo splash appears on the set-top box during fastboot.")
 
-    fs = getattr(a, "fastboot_serial", None) or ""
-    fb = ["fastboot"] + (["-s", fs] if fs else [])
+    Everything that can be decided from Android is decided BEFORE the device is moved
+    out of it: which unit this is, whether OEM unlocking is even permitted, whether the
+    bootloader is already unlocked, and whether the user confirmed. A unit that needs
+    nothing done is never rebooted at all.
+    """
+    print("== stage_unlock: unlock the bootloader (fastboot flashing unlock) ==")
+
+    fb = ["fastboot"] + (["-s", a.fastboot_serial] if a.fastboot_serial else [])
 
     def fb_run(*args, **kw):
         try:
@@ -95,29 +231,73 @@ def stage_unlock(a):
         except FileNotFoundError:
             sys.exit("fastboot not found on PATH -- install Android platform-tools")
 
-    # ---- A. Reboot to fastboot (unless already there) ---------------------------
-    r = fb_run("devices", capture_output=True, text=True)
-    already_fastboot = any(l.strip() and not l.startswith("List")
-                           for l in r.stdout.splitlines())
-    if not already_fastboot:
-        print(f"  rebooting {a.serial!r} into bootloader ...")
-        adb(a.serial, "reboot", "bootloader")
-        print("  waiting for fastboot device (up to 60 s) ...")
-        found = False
-        for _ in range(60):
-            r = fb_run("devices", capture_output=True, text=True)
-            devlines = [l for l in r.stdout.splitlines()
-                        if l.strip() and not l.startswith("List")]
-            if devlines:
-                print(f"  fastboot: {devlines[0].strip()}")
-                found = True
-                break
-            time.sleep(1)
-        if not found:
-            sys.exit("fastboot device did not appear within 60 s -- "
-                     "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
+    def refuse():
+        print()
+        print("  ATTENTION: unlocking the bootloader ERASES ALL DATA (factory reset).")
+        print("  Re-run with --yes to proceed:")
+        print("    python install.py stage_unlock --yes")
+        print("  Nothing was changed." + ("" if a.serial else
+              " The device is in fastboot -- `fastboot reboot` returns it to Android."))
+        return 1
 
-    # ---- B. Check current lock state -------------------------------------------
+    # ---- A. Android-side preflight (the device has not been touched yet) ---------
+    # a.serial is None only when no adb device is ready. That is legal HERE and nowhere
+    # else: a unit left in fastboot by an earlier run has no adb at all, and this stage
+    # must still be able to finish the job. Everything in this section needs Android, so
+    # it is skipped in that case and the bootloader (section D) is the only witness.
+    if a.serial:
+        gp = lambda p: getprop(a.serial, p)
+
+        # Identify the unit BEFORE triggering a factory reset ON it. Pre-root, so the
+        # eMMC-size cross-check is unavailable (SELinux) -> read_sectors=None, exactly as
+        # stage_magisk does. Unlocking is geometry-independent -> require_layout=False.
+        devices.identify(gp, None, require_layout=False, log=print)
+
+        # The OEM-unlocking toggle (Developer options). The bootloader refuses
+        # `flashing unlock` when it is off, so catch it here rather than 60 s and one
+        # reboot later, with the unit stranded on the Mi-logo splash.
+        if gp("sys.oem_unlock_allowed") == "0":
+            sys.exit("OEM unlocking is OFF on this device -- the bootloader will refuse to "
+                     "unlock.\nOn the device: Settings > System > Developer options > OEM "
+                     "unlocking -> ON. Then re-run this stage.")
+
+        # Lock state as Android sees it. ro.boot.* is handed to the kernel by the
+        # bootloader itself, so an ALREADY-UNLOCKED unit can be answered without moving
+        # it. Only these two exact readings are trusted; anything else falls through to
+        # the bootloader's own answer in section D.
+        locked, vbmeta = gp("ro.boot.flash.locked"), gp("ro.boot.vbmeta.device_state")
+        if locked == "0" or vbmeta == "unlocked":
+            print(f"  Bootloader is already unlocked (ro.boot.flash.locked={locked or '?'}, "
+                  f"vbmeta.device_state={vbmeta or '?'}). Nothing to do.")
+            print("  Continue with stage_magisk.")
+            return 0
+        if locked == "1":
+            print("  Bootloader is LOCKED (ro.boot.flash.locked=1).")
+        else:
+            print(f"  Lock state unclear from Android (ro.boot.flash.locked={locked or '?'}) "
+                  f"-- the bootloader is asked directly below.")
+
+        # ---- B. Confirm the destructive unlock, while the device is still untouched --
+        if not a.yes:
+            return refuse()
+
+    # ---- C. Get to fastboot ------------------------------------------------------
+    # Serial first, deliberately: if adb sees the unit we just identified, THAT is the
+    # unit to reboot -- never assume some already-present fastboot device is the same
+    # one, or we would vet one box and unlock another. (If a --serial unit turns out to
+    # be in fastboot already, the reboot is a no-op and the wait returns immediately.)
+    if a.serial:
+        print(f"  rebooting {a.serial!r} into bootloader ...")
+        print("  A Mi-logo splash appears on the set-top box during fastboot.")
+        adb(a.serial, "reboot", "bootloader")
+        wait_for_fastboot(fb)
+    elif fastboot_devices(fb):
+        print("  no adb device, but a unit is already in fastboot -- picking up there.")
+    else:
+        sys.exit("no adb device and no fastboot device found. Plug the unit in over USB -- "
+                 "either booted in Android with USB debugging on, or already in fastboot.")
+
+    # ---- D. Ask the bootloader itself (authoritative) ----------------------------
     # `getvar unlocked` prints to stderr as `unlocked: yes|no`.
     r = fb_run("getvar", "unlocked", capture_output=True, text=True)
     var_out = (r.stdout or "") + (r.stderr or "")
@@ -139,16 +319,13 @@ def stage_unlock(a):
     else:
         print("  Bootloader is LOCKED (unlocked: no).")
 
-    # ---- C. Confirm the destructive unlock -------------------------------------
+    # The --yes gate again, for the path that entered with the unit already in fastboot
+    # (section A was skipped, so it has not been asked yet). Re-asking after a section-A
+    # confirmation is impossible: that path sets a.yes.
     if not a.yes:
-        print()
-        print("  ATTENTION: unlocking the bootloader ERASES ALL DATA (factory reset).")
-        print("  Re-run with --yes to proceed:")
-        print("    python install.py stage_unlock --yes")
-        print("  Leaving the device in fastboot. Reboot manually with: fastboot reboot")
-        return 1
+        return refuse()
 
-    # ---- D. Unlock --------------------------------------------------------------
+    # ---- E. Unlock ---------------------------------------------------------------
     for cmd in (["flashing", "unlock"], ["flashing", "unlock_critical"]):
         print(f"  fastboot {' '.join(cmd)} ...")
         r = fb_run(*cmd)
@@ -158,7 +335,7 @@ def stage_unlock(a):
             print("  keys on the set-top box to CONFIRM the unlock, then re-run this stage.")
             sys.exit(f"fastboot {' '.join(cmd)} FAILED")
 
-    # ---- E. Verify + reboot -----------------------------------------------------
+    # ---- F. Verify + reboot ------------------------------------------------------
     r = fb_run("getvar", "unlocked", capture_output=True, text=True)
     var_out = (r.stdout or "") + (r.stderr or "")
     if "unlocked: yes" in var_out:
@@ -182,150 +359,151 @@ def stage_unlock(a):
 
 # ---- stage_magisk: install Magisk APK + flash patched init_boot via fastboot --
 def stage_magisk(a):
-    import time, glob as _glob
     print("== stage_magisk: install Magisk + flash patched init_boot ==")
 
-    magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
+    # ---- A. Install the Magisk manager APK --------------------------------------
+    # Not fatal: the fastboot flash below is what actually roots the unit. (The app still
+    # matters -- without a manager the su daemon has nothing to grant requests with -- so
+    # a failure here shows up as an unconfirmed root in section F.)
+    install_magisk_apk(a.serial, fatal=False)
 
-    # ---- A. Install Magisk APK --------------------------------------------------
-    apks = sorted(_glob.glob(os.path.join(magisk_dir, "Magisk*.apk")) +
-                  _glob.glob(os.path.join(ART, "Magisk*.apk")))
-    if apks:
-        apk = apks[-1]
-        print(f"  installing {os.path.basename(apk)} ...")
-        r = adb(a.serial, "install", "-r", apk, capture_output=True)
-        out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
-        if r.returncode == 0:
-            print("  Magisk APK installed OK")
+    # ---- B. Identify the unit ---------------------------------------------------
+    # ALWAYS, including when the user passes --magisk-img: WHICH IMAGE to flash is the
+    # user's business, WHICH DEVICE IS ATTACHED is ours -- and the bootloader gate in
+    # section E has nothing to compare against without `dev`.
+    #
+    # read_sectors=None: the eMMC size CANNOT be read here. This stage runs before root
+    # exists (rooting is what it does), and SELinux denies the non-root shell domain that
+    # sysfs read on both units -- so we don't pretend to check it. The BOOTLOADER
+    # re-verifies this unit in section E, in the moment before the flash.
+    # require_layout=False: rooting is geometry-independent (the box can be rooted before
+    # its carve layout exists).
+    gp = lambda p: getprop(a.serial, p)
+    dev = devices.identify(gp, None, require_layout=False, log=print)
+    have_fp = gp("ro.bootimage.build.fingerprint") or gp("ro.build.fingerprint")
+
+    # ---- C. Pick the patched init_boot image ------------------------------------
+    # A Magisk-patched init_boot is tied to the EXACT stock build it was patched from
+    # (ro.bootimage.build.fingerprint, baked into its ramdisk). Flashing one onto a unit
+    # running a different build can bootloop. How hard we enforce that depends on where
+    # the image came from.
+    if a.magisk_img:
+        img = os.path.abspath(a.magisk_img)
+        if not os.path.exists(img):
+            sys.exit(f"--magisk-img not found: {img}")
+        # Hand-supplied image -> the firmware match is ADVICE, not a gate: the user may
+        # have patched against a build we cannot know about. Their image, their call.
+        # (The device-identity gate in section E still applies -- that one is not theirs
+        # to waive.)
+        want = devices.boot_fingerprint_from_img(img)
+        if want is None:
+            print(f"  WARNING: no ro.bootimage.build.fingerprint inside "
+                  f"{os.path.basename(img)} -- cannot check it against this unit's build.")
+        elif want != have_fp:
+            print(f"  WARNING: FIRMWARE MISMATCH -- flashing this image can bootloop:")
+            print(f"    this {dev.name} runs:  {have_fp or '(unknown)'}")
+            print(f"    image patched from:    {want}")
         else:
-            print(f"  WARNING: APK install failed: {out}")
+            print(f"  firmware match OK: {have_fp}")
     else:
-        print("  (no Magisk*.apk found in magisk/ or artifacts/ -- skipping APK install)")
-
-    # ---- B. Locate the pre-patched init_boot image ------------------------------
-    # Pick the image by the IDENTIFIED unit (model + eMMC size), NOT by codename:
-    # stick and box both report device=twilight, so a codename-derived filename would
-    # hand the box the STICK's rooted init_boot and brick it. Rooting is geometry-
-    # independent, so require_layout=False (the box can be rooted before its carve
-    # layout exists). Runs pre-root -> plain adb shell (no su).
-    img = getattr(a, "magisk_img", None) or ""
-    dev = None
-    if not img:
-        gp = lambda p: adb(a.serial, "shell", "getprop", p,
-                           capture_output=True, text=True).stdout.strip()
-        # read_sectors=None: the eMMC size CANNOT be read here. This stage runs before
-        # root exists (rooting is what it does), and SELinux denies the non-root shell
-        # domain that sysfs read on both units -- so we don't pretend to check it. The
-        # bootloader re-verifies this unit below, in the moment before the flash.
-        dev = devices.identify(gp, None, require_layout=False, log=print)
-        candidates = [os.path.join(magisk_dir, dev.magisk_img),
+        # Pick by the IDENTIFIED unit, NOT by codename: stick and box both report
+        # device=twilight, so a codename-derived filename would hand the box the STICK's
+        # rooted init_boot. The last two candidates are device-agnostic legacy names; the
+        # firmware guard below is what stops them crossing the units over (the two
+        # fingerprints differ -- .../adastra/... on the stick, .../twilight/... on the box).
+        candidates = [os.path.join(MAGISK_DIR, dev.magisk_img),
                       os.path.join(ART, dev.magisk_img),
                       os.path.join(ART, "init_boot_patched.img"),
                       os.path.join(HERE, "..", "init_boot_patched.img")]
-        for c in candidates:
-            if os.path.exists(c):
-                img = os.path.abspath(c)
-                break
-        if not img:
+        img = next((os.path.abspath(c) for c in candidates if os.path.exists(c)), None)
+        if img is None:
             print(f"  (no init_boot image for {dev.name} found: expected "
                   f"magisk/{dev.magisk_img})")
-        elif img:
-            # Firmware-match guard. A pre-patched init_boot is tied to the EXACT stock
-            # build it was patched from (ro.bootimage.build.fingerprint, baked into the
-            # image); flashing it onto a unit on a different build can bootloop. Refuse
-            # on mismatch. (Skipped entirely when the user supplies their own --magisk-img.)
-            want = devices.expected_boot_fingerprint(dev, img)
-            have = gp("ro.bootimage.build.fingerprint") or gp("ro.build.fingerprint")
-            if want is None:
-                sys.exit(f"could not read the firmware fingerprint from "
-                         f"{os.path.basename(img)} -- refusing to flash it blindly. Patch "
-                         f"your own init_boot for this unit and pass --magisk-img.")
-            if have != want:
-                sys.exit(f"FIRMWARE MISMATCH -- refusing to flash the bundled init_boot.\n"
-                         f"  this {dev.name} is on: {have or '(unknown)'}\n"
-                         f"  bundled {dev.magisk_img} patched from: {want}\n"
-                         f"Flashing a mismatched init_boot can bootloop. Update the unit to "
-                         f"that build, or patch your own init_boot for THIS build and pass "
-                         f"--magisk-img.")
-            print(f"  firmware match OK: {have}")
-    if not img:
-        return None  # signal to caller: no image found, skip
-    if not os.path.exists(img):
-        sys.exit(f"Patched init_boot image not found at: {img}\nPass --magisk-img <path>")
+            return None      # `all` skips the stage; a direct run exits non-zero (main)
+        # Bundled image -> the firmware match is a HARD gate. Nobody chose this file, the
+        # registry did, so a mismatch is a bug or the wrong bundle, not an informed choice.
+        want = devices.expected_boot_fingerprint(dev, img)
+        if want is None:
+            sys.exit(f"could not read the firmware fingerprint out of "
+                     f"{os.path.basename(img)} -- refusing to flash it blindly. Patch your "
+                     f"own init_boot for this unit and pass --magisk-img.")
+        if want != have_fp:
+            sys.exit(f"FIRMWARE MISMATCH -- refusing to flash {os.path.basename(img)}.\n"
+                     f"  this {dev.name} runs:  {have_fp or '(unknown)'}\n"
+                     f"  image patched from:    {want}\n"
+                     f"Flashing a mismatched init_boot can bootloop. Update the unit to that "
+                     f"build, or patch your own init_boot for THIS build and pass "
+                     f"--magisk-img.")
+        print(f"  firmware match OK: {have_fp}")
+
+    check_boot_image(img)             # Android boot magic + plausible size
+    verify_bundled_sha256(img)        # vs SHA256SUMS.txt, when the bundle ships one
     print(f"  image: {img}  ({os.path.getsize(img):,} B)")
 
-    # Patch the ACTIVE slot's init_boot so the *running* system uses the rooted
-    # ramdisk. Do NOT hardcode _a: on a unit whose active slot is _b, flashing
-    # init_boot_a roots the inactive slot and leaves the running system unrooted.
-    r = subprocess.run(["adb", "-s", a.serial, "shell", "getprop", "ro.boot.slot_suffix"],
-                       capture_output=True, text=True)
-    slot = (r.stdout or "").strip() or "_a"
+    # ---- D. Which slot ----------------------------------------------------------
+    # Patch the ACTIVE slot's init_boot so the *running* system gets the rooted ramdisk.
+    # Never guess: the stick in hand runs slot _b, and flashing init_boot_a there would
+    # root the INACTIVE slot -- the unit boots fine, unrooted, and the failure surfaces
+    # stages later as "su root not available".
+    slot = gp("ro.boot.slot_suffix")
+    if slot not in ("_a", "_b"):
+        sys.exit(f"could not read the active slot (ro.boot.slot_suffix="
+                 f"{slot or '(empty)'}) -- refusing to guess which init_boot to flash. "
+                 f"Let Android finish booting, re-plug USB, and re-run.")
     ib_part = f"init_boot{slot}"
     print(f"  active slot={slot} -> will flash {ib_part}")
 
-    # ---- C. Reboot to fastboot and flash ----------------------------------------
-    fs = getattr(a, "fastboot_serial", None) or ""
-    fb = ["fastboot"] + (["-s", fs] if fs else [])
+    # ---- E. Reboot to fastboot, re-verify the unit, flash -----------------------
+    fb = ["fastboot"] + (["-s", a.fastboot_serial] if a.fastboot_serial else [])
 
     print(f"  rebooting {a.serial!r} into bootloader ...")
     adb(a.serial, "reboot", "bootloader")
+    wait_for_fastboot(fb)
 
-    print("  waiting for fastboot device (up to 60 s) ...")
-    found = False
-    for _ in range(60):
-        try:
-            r = subprocess.run(fb + ["devices"], capture_output=True, text=True)
-        except FileNotFoundError:
-            sys.exit("fastboot not found on PATH -- install Android platform-tools")
-        devlines = [l for l in r.stdout.splitlines()
-                    if l.strip() and not l.startswith("List")]
-        if devlines:
-            print(f"  fastboot: {devlines[0].strip()}")
-            found = True
-            break
-        time.sleep(1)
-    if not found:
-        sys.exit("fastboot device did not appear within 60 s -- "
-                 "check USB cable and driver (Xiaomi bootloader driver / WinUSB)")
-
-    # ---- C2. Bootloader-side identity re-check (the hardware fact) ---------------
-    # Everything that picked `img` was an Android property -- a string out of build.prop.
-    # The eMMC size, the one fact that cannot be spoofed, is unreadable pre-root (SELinux).
-    # So ask the BOOTLOADER instead: it reads the real GPT off the eMMC, with no Android
-    # in the path. userdata is ~6x apart between the two units in either state (stock or
-    # already-carved), so a wrong device cannot hide. Last gate before the first write.
-    if dev is not None:
-        r = subprocess.run(fb + ["getvar", "partition-size:userdata"],
-                           capture_output=True, text=True)
-        ud = devices.parse_fastboot_size((r.stdout or "") + (r.stderr or ""))
-        if ud is None:
-            # Variable absent/unsupported. Absence of evidence is not evidence of a wrong
-            # device -- do not block a legitimate install on an older bootloader.
-            print("  WARNING: the bootloader did not report partition-size:userdata, so "
-                  "this unit could not be re-verified against the eMMC. Continuing on the "
-                  "Android-side identity alone.")
-        elif not dev.userdata_size_ok(ud):
-            expect = " or ".join(f"{n // devices.MIB:,} MiB"
-                                 for n in dev.expected_userdata_bytes())
-            subprocess.run(fb + ["reboot"])
-            sys.exit(f"DEVICE MISMATCH -- the bootloader reports a userdata partition of "
-                     f"{ud // devices.MIB:,} MiB, which does not belong to the "
-                     f"{dev.name} (expected {expect}).\n"
-                     f"Android claimed this was a {dev.name}, the hardware disagrees, and "
-                     f"flashing the wrong unit's init_boot can brick it. REFUSING TO FLASH "
-                     f"-- nothing was written. Rebooting to Android.")
-        else:
-            state = ("stock" if ud == dev.stock_userdata_bytes else "carved")
-            print(f"  bootloader check: partition-size:userdata = "
-                  f"{ud // devices.MIB:,} MiB -> {dev.slug} ({state}) -- CONFIRMED")
+    # Bootloader-side identity re-check (the hardware fact). Everything that picked `img`
+    # was an Android property -- a string out of build.prop. The eMMC size, the one fact
+    # that cannot be spoofed, is unreadable pre-root (SELinux). So ask the BOOTLOADER
+    # instead: it reads the real GPT off the eMMC, with no Android in the path. userdata
+    # is ~6x apart between the two units in either state (stock or already-carved), so a
+    # wrong device cannot hide. Last gate before the first write.
+    r = subprocess.run(fb + ["getvar", "partition-size:userdata"],
+                       capture_output=True, text=True)
+    ud = devices.parse_fastboot_size((r.stdout or "") + (r.stderr or ""))
+    if ud is None:
+        # Variable absent/unsupported. Absence of evidence is not evidence of a wrong
+        # device -- do not block a legitimate install on an older bootloader.
+        print("  WARNING: the bootloader did not report partition-size:userdata, so this "
+              "unit could not be re-verified against the eMMC. Continuing on the "
+              "Android-side identity alone.")
+    elif not dev.userdata_size_ok(ud):
+        expect = " or ".join(f"{n // devices.MIB:,} MiB"
+                             for n in dev.expected_userdata_bytes())
+        subprocess.run(fb + ["reboot"])
+        sys.exit(f"DEVICE MISMATCH -- the bootloader reports a userdata partition of "
+                 f"{ud // devices.MIB:,} MiB, which does not belong to the "
+                 f"{dev.name} (expected {expect}).\n"
+                 f"Android claimed this was a {dev.name}, the hardware disagrees, and "
+                 f"flashing the wrong unit's init_boot can brick it. REFUSING TO FLASH "
+                 f"-- nothing was written. Rebooting to Android.")
+    else:
+        state = ("stock" if ud == dev.stock_userdata_bytes else "carved")
+        print(f"  bootloader check: partition-size:userdata = "
+              f"{ud // devices.MIB:,} MiB -> {dev.slug} ({state}) -- CONFIRMED")
 
     print(f"  fastboot flash {ib_part} ...")
     r = subprocess.run(fb + ["flash", ib_part, img])
     if r.returncode != 0:
-        sys.exit(f"fastboot flash {ib_part} FAILED")
+        # Deliberately NOT rebooting. init_boot may be half-written, and this stage cannot
+        # pick a unit back up from fastboot (it needs adb to identify it), so hand the
+        # human the one command that finishes the job from where the unit actually is.
+        sys.exit(f"fastboot flash {ib_part} FAILED -- the unit is still in the bootloader "
+                 f"and its {ib_part} may be half-written. Retry the flash from there:\n"
+                 f"  fastboot flash {ib_part} {img}\n"
+                 f"Only once that succeeds: `fastboot reboot`. (Booting on a partially "
+                 f"written init_boot can leave the unit unable to start Android.)")
     print(f"  {ib_part} flashed OK")
 
-    # ---- D. Reboot to Android and verify root -----------------------------------
+    # ---- F. Reboot to Android and verify root -----------------------------------
     print("  rebooting to Android ...")
     subprocess.run(fb + ["reboot"])
 
@@ -352,22 +530,10 @@ def stage_magisk(a):
 
 # ---- stage 1b: re-install Magisk APK after the stage1 factory reset ---------
 def stage1b(a):
-    import glob as _glob
     print("== stage1b: re-install Magisk APK (factory reset wiped userdata) ==")
     print("  (the active slot's init_boot is still patched -- no fastboot needed)")
 
-    magisk_dir = os.path.abspath(os.path.join(HERE, "..", "magisk"))
-    apks = sorted(_glob.glob(os.path.join(magisk_dir, "Magisk*.apk")) +
-                  _glob.glob(os.path.join(ART, "Magisk*.apk")))
-    if not apks:
-        sys.exit("no Magisk*.apk found in magisk/ or artifacts/")
-    apk = apks[-1]
-    print(f"  installing {os.path.basename(apk)} ...")
-    r = adb(a.serial, "install", "-r", apk, capture_output=True)
-    out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
-    if r.returncode != 0:
-        sys.exit(f"  APK install failed: {out}")
-    print("  Magisk APK installed OK")
+    install_magisk_apk(a.serial, fatal=True)
     print()
     print("  On the device:")
     print("    1. Open the Magisk app and complete any first-time setup")
@@ -507,27 +673,43 @@ def main():
     ap.add_argument("--no-keymap", dest="no_keymap", action="store_true",
                     help="stage3: skip the Xiaomi remote keymap (generic CoreELEC box)")
     ap.add_argument("--magisk-img", dest="magisk_img", default="",
-                    help="stage_magisk: path to Magisk-patched init_boot image "
-                         "(auto-found if init_boot_patched.img is in artifacts/ or bundle root)")
+                    help="stage_magisk: path to your own Magisk-patched init_boot image. "
+                         "Omit to use the bundled image for the identified unit "
+                         "(magisk/<per-device name>, see build/devices.py). A supplied "
+                         "image only WARNS on a firmware mismatch instead of refusing.")
     ap.add_argument("--fastboot-serial", dest="fastboot_serial", default="",
                     help="stage_magisk: fastboot device serial (auto-detected if omitted)")
     a = ap.parse_args()
 
     if a.stage in {"stage_unlock", "stage_magisk", "stage1", "stage1b", "stage2", "stage2a", "verify", "all"}:
         import adb_serial
-        a.serial = adb_serial.resolve(a.serial)
+        # stage_unlock alone tolerates a missing adb device: a unit left in fastboot by an
+        # earlier run has no adb, and that stage knows how to pick the job back up there.
+        a.serial = adb_serial.resolve(a.serial, required=(a.stage != "stage_unlock"))
 
     if a.stage == "all":
         print("Running stage_magisk (if image found) + stage1.")
         print("After stage1 reboot into Android and re-run:")
         print("  python install.py stage2     (then stage2a optional)")
         print("Then boot CoreELEC and:  python install.py stage3 --host <coreelec-ip>")
+        # None = stage_magisk found no image for this unit and flashed nothing. In `all`
+        # that is survivable (an already-rooted unit still installs), so carry on to
+        # stage1 -- which fails closed on a missing root ("su root not available").
         if stage_magisk(a) is None:
-            print("  (stage_magisk skipped: no init_boot_patched.img found in artifacts/ or bundle root)")
+            print("  (stage_magisk skipped: no patched init_boot for this unit in magisk/)")
         sys.exit(stage1(a))
-    sys.exit({"stage_unlock": stage_unlock, "stage_magisk": stage_magisk, "stage1": stage1,
-              "stage1b": stage1b, "stage2": stage2, "stage2a": stage2a,
-              "stage3": stage3, "verify": verify}[a.stage](a))
+
+    rc = {"stage_unlock": stage_unlock, "stage_magisk": stage_magisk, "stage1": stage1,
+          "stage1b": stage1b, "stage2": stage2, "stage2a": stage2a,
+          "stage3": stage3, "verify": verify}[a.stage](a)
+    if rc is None:
+        # Only stage_magisk returns None, and only when it found no image. Run on its own
+        # (rather than inside `all`), doing nothing is a failure, not a success -- exiting
+        # 0 here would tell the user the unit was rooted when nothing was flashed.
+        sys.exit("stage_magisk: no patched init_boot found for this unit -- NOTHING was "
+                 "flashed and the device is unchanged. Put the image in magisk/ (see "
+                 "magisk/README.md) or pass --magisk-img <path>.")
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

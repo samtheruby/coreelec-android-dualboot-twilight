@@ -46,9 +46,16 @@ def list_devices():
     return devs
 
 
-def resolve(serial):
+def resolve(serial, required=True):
     """Return an explicit --serial unchanged (USB device id). Otherwise auto-pick the
-    sole ready device, or exit with guidance."""
+    sole ready device, or exit with guidance.
+
+    required=False returns None instead of exiting when no device is ready. Only
+    stage_unlock uses it: that stage can also run against a unit sitting in fastboot
+    (no adb at all), and must not be blocked here before it gets the chance to look.
+    An ambiguous choice (several devices) still exits either way -- guessing which
+    box to factory-reset is not an option.
+    """
     if serial:
         return serial
     devs = list_devices()
@@ -57,6 +64,8 @@ def resolve(serial):
         print(f"  (auto-selected the only adb device: {ready[0]})")
         return ready[0]
     if not ready:
+        if not required:
+            return None
         extra = f"  seen but not ready: {devs}" if devs else ""
         sys.exit("no ready adb device. Plug in USB + enable USB debugging (authorize the "
                  "on-screen prompt), then retry." + extra)
