@@ -35,13 +35,36 @@ import envtool, build_env, ab_misc, layout as L, devices, bundle, install_state 
 # r3=SHA verify/gate fix for regions >=4 GiB (busybox head -c overflow),
 # v1.2.4=stage_magisk pre-root identity + bootloader flash gate,
 # v1.2.5=quiesce /data + carve stability probe before the CE streams,
-# v1.2.6=artifact SHA-256 gate + CE image size gate + per-device pulled_backups.
-BUILD = "1.2.6 (artifact SHA gate + CE size gate + per-device backups)"
+# v1.2.6=artifact SHA-256 gate + CE image size gate + per-device pulled_backups,
+# v1.2.7=CE size gate is exact (a too-SMALL image is the other unit's), and the streamed-
+#        write timeout scales with the DECOMPRESSED image instead of a flat 900 s.
+BUILD = "1.2.7 (exact CE size gate + write timeout scaled to the image)"
 
 DISK = "/dev/block/mmcblk0"
 BIG = {"ce_flash.img", "ce_storage.img"}
 NC = "/vendor/bin/busybox nc"
 GUNZIP = "/vendor/bin/busybox gzip -dc"
+
+# How long the DEVICE is given to finish a streamed write after the PC has sent the last
+# byte. This has to scale with the DECOMPRESSED image, not the payload that crosses the
+# wire, and the difference is enormous: the box's ce_storage.img.gz is 10.4 MB and expands
+# to 10 GiB (an empty ext4 is almost all zeros).
+#
+# sendall() is deliberately unbounded (see _nc_write_once), so the transfer itself is not on
+# this clock -- but only because TCP backpressure holds the PC back while the device chews
+# through it. Whatever is still sitting in the socket / adb-forward buffers when we SHUT_WR
+# has to be decompressed and written INSIDE this timeout. In the worst case that is the whole
+# image, so a flat 900 s asked the box to sustain 10 GiB / 900 s = ~11.9 MB/s through
+# `dd bs=512` -- about 21 million write syscalls. The stick's 1.2 GiB carve only ever needed
+# ~1.4 MB/s, which is why a single constant looked fine for years.
+#
+# So assume a deliberately pessimistic floor for the eMMC and derive the budget from it. Too
+# high a guess costs a SPURIOUS timeout, and a retry re-streams the image from byte zero --
+# three times, for 10 GiB. Too low a guess only means a genuinely wedged write takes longer
+# to be declared dead, and die() now makes that outcome safe rather than dangerous.
+MIN_WRITE_BPS = 4 * 1024 * 1024      # 4 MiB/s -- far below anything measured on either unit
+NC_TIMEOUT_FLOOR = 900               # keeps the stick's proven behaviour exactly as it was
+NC_TIMEOUT_SLACK = 300               # dd's conv=fsync flush, process teardown
 
 
 class _NcRetry(Exception):
@@ -361,17 +384,23 @@ class Ctx:
             return gz, True
         sys.exit(f"missing artifact {basename}[.gz]")
 
+    def _write_timeout(self, nbytes):
+        """How long to give the device to finish writing `nbytes` after the last byte is
+        sent. See MIN_WRITE_BPS: the budget must follow the DECOMPRESSED size, because that
+        is what dd actually writes -- not the compressed payload that crossed the wire."""
+        return max(NC_TIMEOUT_FLOOR, int(nbytes / MIN_WRITE_BPS) + NC_TIMEOUT_SLACK)
+
     def write_offset(self, basename, seek, label):
         path, gz = self._img_payload(basename)
+        # Decompressed length: already computed and cached by check_ce_image_sizes, so this
+        # costs nothing here.
+        _, n = self._sha_image_raw(basename)
+        timeout = self._write_timeout(n)
         sink = f"dd of={DISK} bs=512 seek={seek} conv=fsync"
         devcmd = f"{GUNZIP} | {sink}" if gz else sink
-        self.nc_write(path, devcmd, label)
-
-    def write_node(self, basename, name, bs=None):
-        path, gz = self._img_payload(basename)
-        sink = f"dd of=/dev/block/by-name/{name} conv=fsync" + (f" bs={bs}" if bs else "")
-        devcmd = f"{GUNZIP} | {sink}" if gz else sink
-        self.nc_write(path, devcmd, name)
+        print(f"  {label}: {n:,} B to write; device given up to {timeout // 60} min "
+              f"after the last byte is sent")
+        self.nc_write(path, devcmd, label, verify_timeout=timeout)
 
     def _write_retry(self, attempt_fn, label, attempts=3, pause=1.0):
         """Run attempt_fn() -- a single idempotent-overwrite write -- up to `attempts`
