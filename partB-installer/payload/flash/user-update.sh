@@ -24,6 +24,10 @@
 #   * NEVER hardcode the boot default. v2's fw_setenv fallback wrote the ANDROID-default
 #     bootcmd unconditionally, AFTER restoring the env image -- so on a box the user had set
 #     to boot CoreELEC by default, an OS update silently flipped it back to Android.
+#   * NEVER let a MISSING TOOL read as a BAD FILE. The only binary here is busybox, and its
+#     applet set is small (no wc, no expr, no find, no sort). v3 sized the env image with
+#     `wc -c ... || echo 0` and so declared every healthy image "0 B -- truncated" and
+#     refused to restore the gate, on every box, on every update. See file_size().
 
 log() { echo "[user-update] $*"; }
 
@@ -55,6 +59,29 @@ resolve_node() {
     mknod "$real" b "${mm%%:*}" "${mm##*:}" || return 1
   fi
   echo "$real"
+}
+
+# Size of $1 in bytes on stdout; return 1 if it CANNOT BE MEASURED (no tool for the job).
+#
+# The initramfs ships one binary -- busybox -- and `wc` is not one of its applets. `stat` is.
+# v3 sized the env image with `SZ=$(wc -c < file 2>/dev/null || echo 0)`, so on every real box
+# the substitution failed with "not found" and `|| echo 0` reported a healthy 65536 B image as
+# 0 B. The hook then refused to restore the gate as "truncated or corrupt", found no fw_setenv
+# either (also absent here), and the box needed a manual re-assert after EVERY CoreELEC update.
+#
+# So: never let a missing tool read as an empty file. The caller distinguishes the two.
+# Two independent applets, both verified present in this initramfs (stat, and ls+awk). A
+# non-numeric answer is discarded rather than returned: `[ "$SZ" -ne 65536 ]` on a non-number
+# is a shell ERROR, not a false, and the caller's `elif` chain would then fall through to the
+# write -- which is the whole thing this check exists to prevent.
+file_size() {
+  for s in "$(stat -c %s "$1" 2>/dev/null)" "$(ls -l "$1" 2>/dev/null | awk '{print $5}')"; do
+    case "$s" in
+      ''|*[!0-9]*) continue ;;
+      *) echo "$s"; return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # Does the env area at $1 carry the boot gate for slot partition $2 (e.g. boot_a)?
@@ -138,8 +165,11 @@ sync
 ENV_RESTORED=0
 [ -z "$ENVDEV" ] && ENVDEV=$(resolve_node env)
 if [ -f /flash/env_dualboot.bin ] && [ -n "$ENVDEV" ]; then
-  SZ=$(wc -c < /flash/env_dualboot.bin 2>/dev/null || echo 0)
-  if [ "$SZ" -ne "$ENV_SIZE" ]; then
+  if ! SZ=$(file_size /flash/env_dualboot.bin); then
+    log "ERROR: cannot measure env_dualboot.bin (no stat, no ls+awk) -- so it cannot be checked,"
+    log "ERROR: and an unchecked 64 KiB blob does not go onto $ENVDEV. REFUSING."
+    RC=1
+  elif [ "$SZ" -ne "$ENV_SIZE" ]; then
     log "ERROR: env_dualboot.bin is ${SZ} B, expected ${ENV_SIZE} -- truncated or corrupt."
     log "ERROR: REFUSING to write it to $ENVDEV (a bad env is how a box stops booting)."
     RC=1

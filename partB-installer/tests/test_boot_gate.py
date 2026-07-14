@@ -124,6 +124,49 @@ def hook_validates_the_env_blob_before_writing_it():
         "detected (a blob from the other slot or another unit would be written blindly)")
 
 
+# The initramfs the hook runs in ships exactly ONE binary -- usr/bin/busybox -- and that
+# build's applet table is the whole world available to it. These are NOT in it (verified by
+# unpacking the ramdisk out of payload/flash/kernel.img and reading busybox's applet names;
+# `stat`, `awk`, `cut`, `cp`, `mv`, `md5sum`, `printf` and `tee` ARE there):
+INITRAMFS_MISSING = ("wc", "expr", "find", "od", "cmp", "xargs", "mktemp", "sha256sum",
+                     "du", "sort")
+
+
+def hook_uses_only_tools_the_initramfs_has():
+    """The hook runs where busybox is the only binary, so a tool it lacks is a runtime failure
+    on the box, unattended, with no one watching.
+
+    `wc` is not a busybox applet here. v3 sized the env image with
+    `SZ=$(wc -c < /flash/env_dualboot.bin 2>/dev/null || echo 0)`, so on every real box that
+    substitution failed with "not found" and `|| echo 0` reported a perfectly healthy 65536 B
+    image as 0 B. The hook then refused to restore the gate ("truncated or corrupt"), found no
+    fw_setenv either (also absent from the initramfs), and left the box needing a MANUAL
+    re-assert after every single CoreELEC update.
+    """
+    src = open(HOOK, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    for tool in INITRAMFS_MISSING:
+        hit = re.search(rf"(?:^|[|;&(]|\$\()\s*{tool}\s", code, re.M)
+        assert not hit, (
+            f"the hook calls `{tool}`, which the CoreELEC initramfs busybox does not provide: "
+            f"{hit.group(0).strip()!r}")
+
+
+def hook_cannot_mistake_an_unmeasurable_file_for_an_empty_one():
+    """The size check decides whether 64 KiB gets written to the env partition, so it has to
+    fail for the right reason. `|| echo 0` collapses "I have no tool to measure this" into
+    "the file is empty" -- the two are opposite problems and only one of them is the file's
+    fault."""
+    src = open(HOOK, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert "stat -c %s" in code, (
+        "the hook must size env_dualboot.bin with `stat` -- the initramfs busybox has stat "
+        "and does NOT have wc")
+    assert not re.search(r"\|\|\s*echo\s+0", code), (
+        "a failed size measurement is being turned into a size of 0, which reads as a "
+        "truncated file and makes the hook refuse to restore a healthy env image")
+
+
 def hook_is_device_independent():
     """stick and box number their partitions identically today, but the hook must not depend
     on that: everything is resolved by PARTNAME."""
@@ -164,6 +207,8 @@ if __name__ == "__main__":
     check("user-update.sh fallback bootcmd == envtool(android)", hook_fallback_bootcmd_is_a_real_gate)
     check("user-update.sh fallback only runs without an env image", hook_fallback_runs_only_without_an_env_image)
     check("user-update.sh validates env_dualboot.bin before writing", hook_validates_the_env_blob_before_writing_it)
+    check("user-update.sh only calls tools the initramfs busybox has", hook_uses_only_tools_the_initramfs_has)
+    check("user-update.sh can't read 'cannot measure' as 'empty file'", hook_cannot_mistake_an_unmeasurable_file_for_an_empty_one)
     check("user-update.sh is device-independent (no mmcblk0pN)", hook_is_device_independent)
     print("the gate is device-independent")
     check("gate_vars depends only on (slot, default)", gate_does_not_vary_by_device)
