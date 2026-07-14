@@ -42,6 +42,13 @@ mkfs.vfat -F 32 -n CE_FLASH -i 43450001 "$IMG" >/dev/null   # 'CE' 00 01
 FILES=(SYSTEM SYSTEM.md5 kernel.img kernel.img.md5 dtb.img recovery.img dovi.ko
        cfgload cfgload_env aml_autoscript config.ini resolution.ini user-update.sh)
 
+# dovi.ko does not come from the CoreELEC image -- it is copied into payload/flash by hand
+# and carried across every payload swap, and payload/flash is gitignored, so a stale module
+# leaves no trace in the diff and ships. v1.2.8 went out with 5.15_2.6_am9_dovi_felfix.ko
+# that way, when the current module is 5.15_2.6_dovi_patched_fix_fel.ko. Pin it: bump this
+# only when the module is deliberately updated.
+DOVI_SHA256=f6c26659a255447685ceac9441e399c999b1fae9c6435c48d70e14a14dd7f8f7
+
 export MTOOLS_SKIP_CHECK=1
 echo "== mcopy payload =="
 for f in "${FILES[@]}"; do
@@ -112,6 +119,20 @@ for f in dovi.ko resolution.ini user-update.sh; do
   fi
 done
 [ "$missing" -eq 0 ] || { echo "required additions missing from payload -- abort"; exit 1; }
+
+# Present is not enough for dovi.ko -- the wrong module is just as silent as no module, and
+# it only shows up as Dolby Vision misbehaving on the box. Hash the one that came back OUT
+# of the FAT, so this covers a stale payload file AND a bad copy in.
+echo "== verify: dovi.ko is the pinned module =="
+mcopy -i "$IMG" "::dovi.ko" /tmp/_dovi_check
+dcalc=$(sha256sum /tmp/_dovi_check | cut -d' ' -f1)
+rm -f /tmp/_dovi_check
+echo "   pinned=$DOVI_SHA256"
+echo "   in img=$dcalc  $( [ "$dcalc" = "$DOVI_SHA256" ] && echo MATCH || echo MISMATCH )"
+[ "$dcalc" = "$DOVI_SHA256" ] || {
+  echo "   !! dovi.ko is not the pinned module -- payload/flash/dovi.ko is stale, or the"
+  echo "      module was updated on purpose (then bump DOVI_SHA256 at the top of this script)"
+  exit 1; }
 
 sz=$(stat -c %s "$IMG")
 echo

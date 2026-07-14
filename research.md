@@ -91,7 +91,11 @@ So the **first question on any new device is: can u-boot see/boot a GPT-added FA
   slots** (the reserved entry array is the spec-min 16 KiB = room for 128).
 - Bootloader **unlocked** (`verifiedbootstate=orange`, AVB effectively off), rooted (Magisk).
 - `userdata` is **FBE-encrypted** (`ro.crypto.type=file`) — CoreELEC cannot read Android user data.
-- CoreELEC build: **CE-22 (Piers nightly)**, kernel 5.15.196.
+- CoreELEC build: **CE-22 (Piers nightly)**, kernel 5.15.196. The shipped payload is the **stock**
+  nightly (`CoreELEC-Amlogic-no.aarch64-22.0-Piers_nightly_20260714-Generic`), not a third-party
+  test build: a release is where a user's install *starts*, and CoreELEC's own updater is how they
+  move off it, so custom builds (SamuriHL's ne/no experimentals) are one in-CoreELEC update away
+  and do not belong in the bundle. Kernel is 5.15.196 either way, so `dovi.ko` is unaffected.
 - **Model-correct dtb = `s7d_s905x5m_xiaomi_3rd_gen`** (the generic `s7d_s905x5m_2g` boots but
   misconfigures the GPU and throws many dmesg errors).
 
@@ -345,7 +349,7 @@ regions SHA-verified, plus a CE-update self-heal). `make_dist.py` produces a sel
 | A/B `misc` unbootable | A/B devices ✓ | Skip on non-A/B devices |
 | Write methods (push+dd / nc / base64) | ✓ generic adb | none |
 | **CoreELEC dtb** | ✗ | **Device + build specific — always replace** |
-| Dolby-Vision `dovi.ko` (felfix) | ✓ | Unlocked kernel module works on most kernels |
+| Dolby-Vision `dovi.ko` (`5.15_2.6_dovi_patched_fix_fel.ko`) | ✓ | Unlocked kernel module works on most kernels; pinned by sha256 in `build_ce_flash.sh` |
 | CE-update hook (`user-update.sh`) | Concept ✓ | Resync targets (boot_X/dtbo_X here; cfgload/mount-storage on Ugoos-class) |
 | **`blockgms`** (GMS OTA block) | ✓ **generic Google TV** | none |
 | `blockota` (Xiaomi updater) | ✗ | Vendor updater package name |
