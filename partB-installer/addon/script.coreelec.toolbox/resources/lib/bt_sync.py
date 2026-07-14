@@ -6,6 +6,14 @@
 # input devices (remotes/keyboards -- audio devices are skipped), convert the BLE
 # keys (LE_KEY_PENC/PID) to BlueZ format, and write them under the adapter's store.
 # No MAC override is needed when CoreELEC + Android share the chip's efuse BT MAC.
+#
+# CoreELEC must connect from that shared PUBLIC address -- exactly as Android does.
+# It must NOT enable BlueZ privacy: with privacy on, the kernel connects from a
+# resolvable private address, and the remote simply does not answer it (the link
+# dies with 0x3e "Connection Failed to be Established", no SMP, no encryption).
+# Android distributes its local IRK during pairing, but only uses it to advertise;
+# as a central it connects from the public address. Toolbox 1.0.1 got this wrong and
+# turned privacy on -- remove_privacy_machinery() undoes that on those installs.
 import os
 import time
 import subprocess
@@ -60,15 +68,26 @@ def adapter_powered():
         return False
 
 
-def stop_bluetooth():
-    """Stop bluetoothd and power the controller down before touching its store.
+def privacy_on():
+    """True while the controller has privacy enabled (it connects from an RPA -- see the
+    module header for why that stops remotes dead)."""
+    try:
+        out = subprocess.check_output(["btmgmt", "info"], text=True)
+    except Exception:
+        return False
+    return any("current settings:" in ln and "privacy" in ln for ln in out.splitlines())
 
-    bluetoothd caches the store in memory, so bonds written under a live daemon can
-    be ignored or rewritten. Powering down matters too: the kernel REJECTS Set
-    Privacy on a powered controller, so bluetoothd can only adopt the imported IRK
-    if it finds the controller down at startup."""
+
+def stop_bluetooth():
+    """Stop bluetoothd before writing its store: it caches the store in memory, so bonds
+    written under a live daemon can be ignored or rewritten.
+
+    The controller is deliberately NOT powered down. This box's vendor driver (amlbt W2) has
+    been seen to wedge on a power cycle -- the driver re-opens but HCI init never completes
+    ("Can't init device hci0: Connection timed out (110)", Set Powered -> Failed 0x03) and
+    only a reboot recovers it. bluetoothd reloads the store on start regardless of power
+    state, so there is nothing to gain by touching it."""
     subprocess.run(["systemctl", "stop", "bluetooth"], check=False)
-    subprocess.run(["btmgmt", "power", "off"], check=False)
 
 
 def start_bluetooth():
@@ -133,70 +152,50 @@ Timeout=500
 """
 
 
-def ensure_local_identity(adapter, cfg):
-    """Present Android's BLE identity, not just its device bonds.
+def remove_privacy_machinery(adapter):
+    """Undo toolbox 1.0.1's privacy experiment. -> True if done, False if a reboot is needed.
 
-    Android pairs with privacy on: it connects from an RPA and distributes its
-    local IRK. A remote that holds the host's IRK REJECTS connections from the
-    bare public address at the link layer (0x3e connect/drop loop, several per
-    second, no SMP traffic at all) -- so importing the LTK alone is not enough.
-    Adopt Android's local IRK as BlueZ's identity and turn privacy on so the
-    kernel also connects from an RPA the remote can resolve.
+    1.0.1 adopted Android's local IRK and set Privacy=device, so the kernel connected from a
+    resolvable private address. Proven wrong on hardware: the remote never answers such a
+    connection -- the link dies in ~130ms with 0x3e "Connection Failed to be Established",
+    no SMP, no encryption, forever. With privacy off and the SAME imported keys the remote
+    connects, encrypts (AES-CCM) and reconnects on its own, because CoreELEC then connects
+    from the public address the remote is bonded to -- the same one Android connects from.
 
-    /etc is squashfs, so Privacy=device goes into a copy of main.conf that a
-    oneshot unit bind-mounts before bluetooth.service starts (bluetooth.service
-    itself is stripped to CAP_NET_* and cannot mount).
+    Drop the bind-mounted main.conf, the oneshot unit that mounted it, and the adapter
+    identity file. The controller keeps the privacy flag for the rest of the boot, and
+    clearing it needs a power cycle -- which this vendor driver can wedge (see
+    stop_bluetooth). Not worth the risk: the flag dies with the boot anyway, so if it is
+    still set, ask for a reboot rather than fight the driver for it."""
+    changed = False
 
-    Call with bluetoothd stopped and the controller down (see stop_bluetooth):
-    the kernel only accepts Set Privacy on an unpowered controller."""
-    irk = cfg["Adapter"].get("LE_LOCAL_KEY_IRK", "").strip().upper() \
-        if cfg.has_section("Adapter") else ""
-    if len(irk) == 32:
-        ident = os.path.join(BLUEZ_BASE, adapter, "identity")
-        want = f"[General]\nIdentityResolvingKey={irk}\n"
-        try:
-            cur = open(ident).read()
-        except OSError:
-            cur = ""
-        if cur != want:
-            with open(ident, "w") as f:
-                f.write(want)
-            os.chmod(ident, 0o600)
-            log("installed Android local IRK as adapter identity")
-
-    if not os.path.exists(MAIN_CONF_OVR) or \
-            "\nPrivacy = device" not in open(MAIN_CONF_OVR).read():
-        conf = open(MAIN_CONF).read()
-        if "\nPrivacy = device" not in conf:
-            if "#Privacy = off" in conf:
-                conf = conf.replace("#Privacy = off", "Privacy = device", 1)
-            else:
-                conf = conf.replace("[General]", "[General]\nPrivacy = device", 1)
-        with open(MAIN_CONF_OVR, "w") as f:
-            f.write(conf)
-        log("wrote privacy-enabled main.conf override")
-
-    if not os.path.exists(PRIVACY_UNIT):
-        os.makedirs(os.path.dirname(PRIVACY_UNIT), exist_ok=True)
-        with open(PRIVACY_UNIT, "w") as f:
-            f.write(
-                "[Unit]\n"
-                "Description=Bind privacy-enabled Bluetooth main.conf (dual-boot BLE identity)\n"
-                "Before=bluetooth.service\n"
-                f"ConditionPathExists={MAIN_CONF_OVR}\n"
-                "\n"
-                "[Service]\n"
-                "Type=oneshot\n"
-                "RemainAfterExit=yes\n"
-                "ExecStart=/bin/sh -c \"grep -q ' /etc/bluetooth/main.conf ' /proc/mounts || "
-                f"mount --bind {MAIN_CONF_OVR} /etc/bluetooth/main.conf\"\n"
-                "\n"
-                "[Install]\n"
-                "WantedBy=multi-user.target\n")
+    if os.path.exists(PRIVACY_UNIT):
+        subprocess.run(["systemctl", "disable", "--now", "bluetooth-privacy.service"], check=False)
+        os.remove(PRIVACY_UNIT)
         subprocess.run(["systemctl", "daemon-reload"], check=False)
-        subprocess.run(["systemctl", "enable", "bluetooth-privacy.service"], check=False)
-        log("installed + enabled bluetooth-privacy.service")
-    subprocess.run(["systemctl", "start", "bluetooth-privacy.service"], check=False)
+        changed = True
+    try:
+        if f" {MAIN_CONF} " in open("/proc/mounts").read():
+            subprocess.run(["umount", MAIN_CONF], check=False)
+            changed = True
+    except OSError:
+        pass
+    if os.path.exists(MAIN_CONF_OVR):
+        os.remove(MAIN_CONF_OVR)
+        changed = True
+
+    ident = os.path.join(BLUEZ_BASE, adapter, "identity")
+    if os.path.exists(ident):
+        os.remove(ident)
+        changed = True
+
+    if changed:
+        log("removed the 1.0.1 privacy machinery (it stopped remotes from connecting)")
+
+    if privacy_on():
+        log("controller still has privacy set -- a reboot is needed to clear it")
+        return False
+    return True
 
 
 def existing_ltk(dest):
@@ -244,6 +243,20 @@ def _verdict(trace, mac):
     return "unreachable"
 
 
+def link_encrypted(mac):
+    """True when the remote is connected AND the link is encrypted right now.
+
+    `hcitool con` marks a live encrypted LE link:
+        < LE C0:5D:39:AB:7B:49 handle 16 state 1 lm CENTRAL AUTH ENCRYPT
+    Encryption is the whole question here, so an ENCRYPT link is proof the keys are good --
+    and the remote may well have reconnected on its own before we started watching."""
+    try:
+        out = subprocess.check_output(["hcitool", "con"], text=True)
+    except Exception:
+        return False
+    return any(mac.upper() in ln.upper() and "ENCRYPT" in ln.upper() for ln in out.splitlines())
+
+
 def verify_bond(mac):
     """Connect once and watch the link. -> "ok" | "stale" | "unreachable".
 
@@ -259,6 +272,8 @@ def verify_bond(mac):
     ...forever, several times a second. Nothing in BlueZ's own logs says "your key is
     stale", so read it off the HCI link itself with btmon.
     """
+    if link_encrypted(mac):
+        return "ok"                          # already back on its own: nothing left to prove
     try:
         mon = subprocess.Popen(["btmon"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                text=True, errors="replace")
@@ -278,7 +293,10 @@ def verify_bond(mac):
         mon.kill()
         trace = ""
 
-    return _verdict(trace, mac)              # "unreachable" == never advertised/asleep/out of range
+    v = _verdict(trace, mac)
+    if v == "unreachable" and link_encrypted(mac):
+        return "ok"                          # it connected without an Encryption Change we saw
+    return v                                 # "unreachable" == never advertised/asleep/out of range
 
 
 def run():
@@ -361,7 +379,7 @@ def run():
             return
 
     stop_bluetooth()
-    ensure_local_identity(adapter, cfg)
+    privacy_cleared = remove_privacy_machinery(adapter)
     imported = []
     for name, mac, dest, info in plan:
         os.makedirs(dest, exist_ok=True)
@@ -377,6 +395,15 @@ def run():
     if not powered:
         msg += "\n\n[COLOR red]The Bluetooth adapter did not come back on. Reboot.[/COLOR]"
         xbmcgui.Dialog().ok(NAME, msg)
+        return
+    if not privacy_cleared:
+        # 1.0.1's privacy setting is gone from disk but still live in the controller, and a
+        # remote will not answer a connection from the private address it makes us use.
+        xbmcgui.Dialog().ok(
+            NAME, msg + "\n\n[COLOR red]Reboot before using the remote.[/COLOR]\n\n"
+                        "An older Toolbox left Bluetooth privacy switched on in the controller. "
+                        "It is removed now, but only a reboot clears it -- until then the remote "
+                        "will connect and immediately drop.")
         return
 
     # Prove the imported keys actually work, instead of leaving the user to discover a
