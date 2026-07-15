@@ -230,7 +230,7 @@ elif command -v fw_setenv >/dev/null 2>&1; then
     [ -n "$mm" ] && mknod /dev/env b "${mm%%:*}" "${mm##*:}"
   fi
   log "re-applying the boot_ce gate (slot ${SLOT})"
-  fw_setenv -c "$FWCFG" bootcefromemmc "setenv bootargs \"\${bootargs} BOOT_IMAGE=kernel.img boot=LABEL=CE_FLASH disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet hdmitx=\"; setenv loadaddr \${loadaddr_kernel}; store read \${dtb_mem_addr} ${DTBOP} 0 0x20000; if imgread kernel ${BOOTP} \${loadaddr}; then bootm \${loadaddr}; fi"
+  fw_setenv -c "$FWCFG" bootcefromemmc "setenv bootargs \"\${bootargs} BOOT_IMAGE=kernel.img boot=LABEL=CE_FLASH disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet vout=1080p60hz,dis frac_rate_policy=0 hdmitx= hdr_policy=1\"; setenv loadaddr \${loadaddr_kernel}; store read \${dtb_mem_addr} ${DTBOP} 0 0x20000; if imgread kernel ${BOOTP} \${loadaddr}; then bootm \${loadaddr}; fi"
   fw_setenv -c "$FWCFG" bootcmd 'if test ${bootfromnand} = 1; then setenv bootfromnand 0; saveenv; else run bootfromsd; run bootfromusb; if test ${boot_ce} = 1; then setenv boot_ce 0; saveenv; run bootcefromemmc; fi; fi; run storeboot'
 else
   log "WARNING: the boot_ce gate could NOT be re-asserted (no env image, no fw_setenv)."

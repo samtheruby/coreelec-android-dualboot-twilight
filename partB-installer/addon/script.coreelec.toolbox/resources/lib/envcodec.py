@@ -38,11 +38,16 @@ def serialize(d):
 
 def gate_vars(ce_slot, default):
     boot, dtbo = "boot" + ce_slot, "dtbo" + ce_slot
-    # Trailing hdmitx= (empty) overrides the bootloader's "hdmitx=,444,8bit"
-    # attr pin, which otherwise blocks HDR10/HLG output (VPP tonemaps to SDR).
+    # Replicate CoreELEC cfgload's full displayopt so the eMMC path owns the display like
+    # the USB path. The bootloader regenerates Android's bootargs each boot pinning
+    # vout=<mode>,enable (resolution+refresh), hdmitx=,444,8bit (8-bit attr) and
+    # frac_rate_policy=1; appended last, our copies win (kernel cmdline: last wins).
+    # vout=1080p60hz,dis lets Kodi switch modes at runtime; frac_rate_policy=0 frees
+    # 23.976/59.94; hdmitx= clears the 8-bit pin (else HDR10/HLG tonemaps to SDR).
     bootcefromemmc = (
         'setenv bootargs "${bootargs} BOOT_IMAGE=kernel.img boot=LABEL=CE_FLASH '
-        'disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet hdmitx="; '
+        'disk=LABEL=CE_STORAGE console=tty0 no_console_suspend quiet '
+        'vout=1080p60hz,dis frac_rate_policy=0 hdmitx= hdr_policy=1"; '
         'setenv loadaddr ${loadaddr_kernel}; '
         f'store read ${{dtb_mem_addr}} {dtbo} 0 0x20000; '
         f'if imgread kernel {boot} ${{loadaddr}}; then bootm ${{loadaddr}}; fi'

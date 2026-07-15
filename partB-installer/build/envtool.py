@@ -82,13 +82,17 @@ def gate_vars(ce_slot, default="android"):
     assert default in ("android", "coreelec")
     boot = "boot" + ce_slot
     dtbo = "dtbo" + ce_slot
-    # Trailing hdmitx= (empty) overrides the bootloader's regenerated
-    # "hdmitx=,444,8bit" attr pin; a pinned 8-bit attr blocks HDR10/HLG output
-    # (VPP tonemaps to SDR). The USB path gets the same override from cfgload.
+    # Replicate CoreELEC cfgload's full displayopt so the eMMC path owns the display just
+    # like the USB path. Each boot the bootloader regenerates Android's bootargs pinning
+    # vout=<mode>,enable (resolution+refresh), hdmitx=,444,8bit (8-bit attr) and
+    # frac_rate_policy=1. Appended last, our copies win (kernel cmdline: last occurrence
+    # wins). vout=1080p60hz,dis hands the display to the OS so Kodi can switch modes at
+    # runtime; frac_rate_policy=0 frees 23.976/59.94; hdmitx= clears the 8-bit pin so
+    # HDR10/HLG is not tonemapped to SDR. This mirrors cfgload's displayopt line.
     bootcefromemmc = (
         'setenv bootargs "${bootargs} BOOT_IMAGE=kernel.img '
         'boot=LABEL=CE_FLASH disk=LABEL=CE_STORAGE console=tty0 '
-        'no_console_suspend quiet hdmitx="; '
+        'no_console_suspend quiet vout=1080p60hz,dis frac_rate_policy=0 hdmitx= hdr_policy=1"; '
         'setenv loadaddr ${loadaddr_kernel}; '
         f'store read ${{dtb_mem_addr}} {dtbo} 0 0x20000; '
         f'if imgread kernel {boot} ${{loadaddr}}; then bootm ${{loadaddr}}; fi'
