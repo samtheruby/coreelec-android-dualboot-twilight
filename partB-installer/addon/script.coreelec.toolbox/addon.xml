@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="script.coreelec.toolbox"
        name="CoreELEC Toolbox"
-       version="1.1.0"
+       version="1.1.1"
        provider-name="cavecrew">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -12,6 +12,11 @@
         <description>Utilities for an Amlogic CoreELEC + Android internal dual-boot: sync Bluetooth remotes paired in Android over to CoreELEC (no re-pairing), choose which OS boots by default, and fix the WiFi MAC if CoreELEC shows a wrong/shared default. Generic to Amlogic CoreELEC boxes.</description>
         <platform>all</platform>
         <news>
+v1.1.1
+- Fix: the addon failed to start ("No module named 'envcodec'") because repair_core imported
+  envcodec by bare name, which does not resolve when Kodi loads the addon as a package. Now
+  falls back correctly in both Kodi and standalone/test contexts. Repair suite works again.
+
 v1.1.0
 - New: "Repair dual-boot install" -- one scan that checks the boot gate, the Dolby Vision
   module (dovi.ko), and the CoreELEC update hook, and fixes only what is stale. Keeps your

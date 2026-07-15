@@ -2,7 +2,10 @@
 # NO xbmc import: importable by tests, runs outside Kodi.
 import hashlib
 
-import envcodec  # pure u-boot env codec (no xbmc)
+try:
+    from resources.lib import envcodec  # Kodi: loaded as resources.lib.repair_core
+except ImportError:
+    import envcodec  # tests / standalone: resources/lib on sys.path
 
 OK, NEEDS_FIX, UNKNOWN, NOT_APPLICABLE = "OK", "NEEDS_FIX", "UNKNOWN", "NOT_APPLICABLE"
 
