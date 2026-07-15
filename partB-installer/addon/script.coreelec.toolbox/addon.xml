@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="script.coreelec.toolbox"
        name="CoreELEC Toolbox"
-       version="1.1.1"
+       version="1.1.2"
        provider-name="cavecrew">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -12,6 +12,14 @@
         <description>Utilities for an Amlogic CoreELEC + Android internal dual-boot: sync Bluetooth remotes paired in Android over to CoreELEC (no re-pairing), choose which OS boots by default, and fix the WiFi MAC if CoreELEC shows a wrong/shared default. Generic to Amlogic CoreELEC boxes.</description>
         <platform>all</platform>
         <news>
+v1.1.2
+- Fix: the CoreELEC update hook (user-update.sh) refused to restore the boot gate on some boxes,
+  logging "cannot measure env_dualboot.bin (no stat, no ls+awk)". It sized the 64 KiB env image
+  with stat/awk, which a box's OS-update initramfs may not have, so a healthy image read as
+  unmeasurable and the gate was left stripped after an update. It now measures with dd + a shell
+  test only -- tools every initramfs has -- so an OS update re-asserts the gate on every box.
+  Run Repair once to refresh the bundled hook on disk.
+
 v1.1.1
 - Fix: the addon failed to start ("No module named 'envcodec'") because repair_core imported
   envcodec by bare name, which does not resolve when Kodi loads the addon as a package. Now
