@@ -101,6 +101,22 @@ def build_fixed_env_rejects_gateless():
     assert False, "expected ValueError on a gateless env"
 
 
+DOVI_SHA256 = "f6c26659a255447685ceac9441e399c999b1fae9c6435c48d70e14a14dd7f8f7"
+REPAIR_DIR = os.path.join(ROOT, "addon", "script.coreelec.toolbox", "resources", "repair")
+
+
+def bundled_dovi_matches_pin():
+    p = os.path.join(REPAIR_DIR, "dovi.ko")
+    got = hashlib.sha256(open(p, "rb").read()).hexdigest()
+    assert got == DOVI_SHA256, f"bundled dovi.ko {got} != pinned {DOVI_SHA256}"
+
+
+def bundled_hook_matches_payload():
+    a = open(os.path.join(REPAIR_DIR, "user-update.sh"), "rb").read()
+    b = open(os.path.join(ROOT, "payload", "flash", "user-update.sh"), "rb").read()
+    assert a == b, "bundled user-update.sh has drifted from payload/flash/user-update.sh"
+
+
 if __name__ == "__main__":
     check("current gate -> OK", gate_current_is_ok)
     check("stale bootcefromemmc -> NEEDS_FIX", stale_bootcefromemmc_needs_fix)
@@ -112,6 +128,8 @@ if __name__ == "__main__":
     check("file missing -> NEEDS_FIX", file_missing_needs_fix)
     check("build_fixed_env repairs + preserves default", build_fixed_env_repairs_and_preserves_default)
     check("build_fixed_env rejects gateless env", build_fixed_env_rejects_gateless)
+    check("bundled dovi.ko == pinned sha256", bundled_dovi_matches_pin)
+    check("bundled user-update.sh == payload copy", bundled_hook_matches_payload)
     print()
     if _FAILURES:
         print(f"{len(_FAILURES)} FAILURE(S)"); sys.exit(1)
