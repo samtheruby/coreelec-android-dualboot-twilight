@@ -81,6 +81,26 @@ def file_missing_needs_fix():
     assert r.status == rc.NEEDS_FIX and r.detail == "missing", r
 
 
+def build_fixed_env_repairs_and_preserves_default():
+    old = envcodec.gate_vars("_a", "android")["bootcefromemmc"].replace(
+        "vout=1080p60hz,dis frac_rate_policy=0 hdmitx= hdr_policy=1", "hdmitx=")
+    env = env_with(bootcefromemmc=old, boot_ce="0")
+    live, dual = rc.build_fixed_env(env)
+    assert envcodec.crc_ok(live) and envcodec.crc_ok(dual)
+    want = envcodec.gate_vars("_a", "android")
+    assert envcodec.parse(live)["bootcefromemmc"] == want["bootcefromemmc"]
+    assert envcodec.parse(live)["bootcmd"] == want["bootcmd"]          # default preserved
+    assert envcodec.parse(dual)["boot_ce"] == "1"                      # android default -> updates re-enter CE
+
+
+def build_fixed_env_rejects_gateless():
+    try:
+        rc.build_fixed_env(envcodec.serialize({"bootcmd": "run storeboot"}))
+    except ValueError:
+        return
+    assert False, "expected ValueError on a gateless env"
+
+
 if __name__ == "__main__":
     check("current gate -> OK", gate_current_is_ok)
     check("stale bootcefromemmc -> NEEDS_FIX", stale_bootcefromemmc_needs_fix)
@@ -90,6 +110,8 @@ if __name__ == "__main__":
     check("file match -> OK", file_match_is_ok)
     check("file differs -> NEEDS_FIX", file_differs_needs_fix)
     check("file missing -> NEEDS_FIX", file_missing_needs_fix)
+    check("build_fixed_env repairs + preserves default", build_fixed_env_repairs_and_preserves_default)
+    check("build_fixed_env rejects gateless env", build_fixed_env_rejects_gateless)
     print()
     if _FAILURES:
         print(f"{len(_FAILURES)} FAILURE(S)"); sys.exit(1)

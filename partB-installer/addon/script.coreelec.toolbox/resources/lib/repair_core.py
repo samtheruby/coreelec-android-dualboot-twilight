@@ -47,3 +47,24 @@ def check_file(id, label, on_disk_bytes, canonical_bytes):
     if hashlib.sha256(on_disk_bytes).digest() == hashlib.sha256(canonical_bytes).digest():
         return CheckResult(id, label, OK, "current")
     return CheckResult(id, label, NEEDS_FIX, "differs from bundled", True)
+
+
+def build_fixed_env(env_bytes):
+    """Return (live_env_bytes, env_dualboot_bytes) with the current gate applied.
+    Preserves the box's boot default. Raises ValueError on bad/gateless env."""
+    if not _env_ok(env_bytes):
+        raise ValueError("refusing to fix an env with a bad CRC")
+    d = envcodec.parse(env_bytes)
+    slot = envcodec.detect_ce_slot(d)
+    if not slot:
+        raise ValueError("no CoreELEC gate in env")
+    default = envcodec.detect_default(d)
+    d.update(envcodec.gate_vars(slot, default))
+    live = envcodec.serialize(d)
+    dual_d = dict(d)
+    if default == "android":
+        dual_d["boot_ce"] = "1"
+    dual = envcodec.serialize(dual_d)
+    if not (envcodec.crc_ok(live) and envcodec.crc_ok(dual)):
+        raise ValueError("internal CRC error building fixed env")
+    return live, dual
