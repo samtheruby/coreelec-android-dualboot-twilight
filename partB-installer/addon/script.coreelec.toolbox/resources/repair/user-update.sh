@@ -24,10 +24,11 @@
 #   * NEVER hardcode the boot default. v2's fw_setenv fallback wrote the ANDROID-default
 #     bootcmd unconditionally, AFTER restoring the env image -- so on a box the user had set
 #     to boot CoreELEC by default, an OS update silently flipped it back to Android.
-#   * NEVER let a MISSING TOOL read as a BAD FILE. The only binary here is busybox, and its
-#     applet set is small (no wc, no expr, no find, no sort). v3 sized the env image with
-#     `wc -c ... || echo 0` and so declared every healthy image "0 B -- truncated" and
-#     refused to restore the gate, on every box, on every update. See file_size().
+#   * NEVER let a MISSING TOOL read as a BAD FILE. The only binary here is busybox, its applet
+#     set is small AND VARIES BY BOX (no wc/expr/find/sort; some boxes also lack stat and awk).
+#     v3 sized the env with `wc -c ... || echo 0` and declared every healthy image "0 B --
+#     truncated"; v4's stat/awk fell over the same way on a box with neither. So is_size() now
+#     measures with only dd + `[ -s ]`, which are always present. See is_size().
 
 log() { echo "[user-update] $*"; }
 
@@ -61,27 +62,26 @@ resolve_node() {
   echo "$real"
 }
 
-# Size of $1 in bytes on stdout; return 1 if it CANNOT BE MEASURED (no tool for the job).
-#
-# The initramfs ships one binary -- busybox -- and `wc` is not one of its applets. `stat` is.
-# v3 sized the env image with `SZ=$(wc -c < file 2>/dev/null || echo 0)`, so on every real box
-# the substitution failed with "not found" and `|| echo 0` reported a healthy 65536 B image as
-# 0 B. The hook then refused to restore the gate as "truncated or corrupt", found no fw_setenv
-# either (also absent here), and the box needed a manual re-assert after EVERY CoreELEC update.
-#
-# So: never let a missing tool read as an empty file. The caller distinguishes the two.
-# Two independent applets, both verified present in this initramfs (stat, and ls+awk). A
-# non-numeric answer is discarded rather than returned: `[ "$SZ" -ne 65536 ]` on a non-number
-# is a shell ERROR, not a false, and the caller's `elif` chain would then fall through to the
-# write -- which is the whole thing this check exists to prevent.
-file_size() {
-  for s in "$(stat -c %s "$1" 2>/dev/null)" "$(ls -l "$1" 2>/dev/null | awk '{print $5}')"; do
-    case "$s" in
-      ''|*[!0-9]*) continue ;;
-      *) echo "$s"; return 0 ;;
-    esac
-  done
-  return 1
+# Is file $1 EXACTLY $2 bytes? Built from only `dd` and the shell's own `[ -s ]` -- the two
+# things this minimal initramfs is PROVEN to have (dd wrote the kernel above; [ -s ] is a shell
+# builtin). It gates a boot-critical write, so it must NOT depend on an OPTIONAL applet:
+#   v3  sized with `wc -c ... || echo 0`; busybox here has no wc, so every healthy 65536 B image
+#       read as 0 B and the gate was never restored -- a manual re-assert after EVERY CE update.
+#   v4  switched to `stat`/`ls+awk`; a real box's initramfs had NEITHER, so it still refused a
+#       good image ("cannot measure ... no stat, no ls+awk"). Same bug, different absent applet.
+# A byte at 0-indexed offset K reads back iff the file has at least K+1 bytes; the file is
+# exactly N bytes when offset N-1 yields a byte and offset N yields nothing. `dd ... of=$ENV_PROBE`
+# then `[ -s ]` tests emptiness by SIZE not content, so a probed NUL (the env is mostly NULs)
+# still counts as present -- a `$(...)` capture would drop it and mis-measure the file.
+ENV_PROBE=/flash/.env_probe.$$
+is_size() {
+  _f=$1; _n=$2; _ok=1
+  dd if="$_f" bs=1 skip=$(( _n - 1 )) count=1 of="$ENV_PROBE" 2>/dev/null
+  [ -s "$ENV_PROBE" ] || _ok=0                       # nothing at N-1 -> file is shorter than N
+  dd if="$_f" bs=1 skip="$_n"         count=1 of="$ENV_PROBE" 2>/dev/null
+  [ -s "$ENV_PROBE" ] && _ok=0                        # a byte at N    -> file is longer than N
+  rm -f "$ENV_PROBE"
+  [ "$_ok" = 1 ]
 }
 
 # Does the env area at $1 carry the boot gate for slot partition $2 (e.g. boot_a)?
@@ -165,12 +165,8 @@ sync
 ENV_RESTORED=0
 [ -z "$ENVDEV" ] && ENVDEV=$(resolve_node env)
 if [ -f /flash/env_dualboot.bin ] && [ -n "$ENVDEV" ]; then
-  if ! SZ=$(file_size /flash/env_dualboot.bin); then
-    log "ERROR: cannot measure env_dualboot.bin (no stat, no ls+awk) -- so it cannot be checked,"
-    log "ERROR: and an unchecked 64 KiB blob does not go onto $ENVDEV. REFUSING."
-    RC=1
-  elif [ "$SZ" -ne "$ENV_SIZE" ]; then
-    log "ERROR: env_dualboot.bin is ${SZ} B, expected ${ENV_SIZE} -- truncated or corrupt."
+  if ! is_size /flash/env_dualboot.bin "$ENV_SIZE"; then
+    log "ERROR: env_dualboot.bin is not exactly ${ENV_SIZE} B (truncated, corrupt or unreadable) --"
     log "ERROR: REFUSING to write it to $ENVDEV (a bad env is how a box stops booting)."
     RC=1
   elif ! tr '\000' '\n' < /flash/env_dualboot.bin | grep -q "imgread kernel ${BOOTP}"; then

@@ -118,18 +118,22 @@ def hook_validates_the_env_blob_before_writing_it():
     """It dd's 64 KiB onto a boot-critical partition, unattended, from a FAT32 filesystem."""
     src = open(HOOK, encoding="utf-8").read()
     assert "ENV_SIZE=65536" in src, "the hook does not know the expected env size"
-    assert re.search(r'-ne "\$ENV_SIZE"', src), "the hook does not size-check env_dualboot.bin"
+    assert re.search(r'is_size\s+/flash/env_dualboot\.bin\s+"\$ENV_SIZE"', src), (
+        "the hook does not size-check env_dualboot.bin against ENV_SIZE before writing it")
     assert "imgread kernel ${BOOTP}" in src, (
         "the hook does not check that env_dualboot.bin carries the gate for the slot it "
         "detected (a blob from the other slot or another unit would be written blindly)")
 
 
-# The initramfs the hook runs in ships exactly ONE binary -- usr/bin/busybox -- and that
-# build's applet table is the whole world available to it. These are NOT in it (verified by
-# unpacking the ramdisk out of payload/flash/kernel.img and reading busybox's applet names;
-# `stat`, `awk`, `cut`, `cp`, `mv`, `md5sum`, `printf` and `tee` ARE there):
+# The hook runs inside CoreELEC's OWN OS-update initramfs -- NOT the ramdisk in
+# payload/flash/kernel.img, which is ours. That image is whatever CoreELEC shipped: busybox is
+# the only binary and its applet table VARIES BY CE VERSION AND BOX, so the hook may depend only
+# on applets present in EVERY such build. `stat` and `awk` were once assumed present -- checked
+# against the WRONG image (ours) -- and a real box's update initramfs had neither, which refused
+# a healthy env image ("cannot measure ... no stat, no ls+awk"). They are in this list now so a
+# boot-critical path can never lean on them again:
 INITRAMFS_MISSING = ("wc", "expr", "find", "od", "cmp", "xargs", "mktemp", "sha256sum",
-                     "du", "sort")
+                     "du", "sort", "stat", "awk")
 
 
 def hook_uses_only_tools_the_initramfs_has():
@@ -152,16 +156,23 @@ def hook_uses_only_tools_the_initramfs_has():
             f"{hit.group(0).strip()!r}")
 
 
-def hook_cannot_mistake_an_unmeasurable_file_for_an_empty_one():
-    """The size check decides whether 64 KiB gets written to the env partition, so it has to
-    fail for the right reason. `|| echo 0` collapses "I have no tool to measure this" into
-    "the file is empty" -- the two are opposite problems and only one of them is the file's
-    fault."""
+def hook_sizes_env_with_only_guaranteed_primitives():
+    """The size check decides whether 64 KiB gets written to the boot-critical env partition, so
+    it must not itself hinge on an OPTIONAL applet -- that only trades one "tool not found" for
+    another. v3 used `wc` (absent); v4 used `stat`/`ls+awk` and a real box had neither, so it
+    refused a healthy image ("cannot measure ... no stat, no ls+awk"). The check must use only
+    what every update initramfs has: `dd` (it already writes the kernel with it) and the shell's
+    own `[ -s ]`."""
     src = open(HOOK, encoding="utf-8").read()
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-    assert "stat -c %s" in code, (
-        "the hook must size env_dualboot.bin with `stat` -- the initramfs busybox has stat "
-        "and does NOT have wc")
+    assert re.search(r"\bis_size\b", code), "the hook no longer sizes the env via is_size()"
+    assert '[ -s "$ENV_PROBE" ]' in code, (
+        "is_size must decide file length with `[ -s ]` (a shell builtin, always present), not "
+        "an external size tool")
+    for tool in ("wc", "stat", "awk", "ls"):
+        assert not re.search(rf"(?:^|[|;&(]|\$\()\s*{tool}\s", code), (
+            f"the env size check calls `{tool}` -- a boot-critical write must not hinge on an "
+            f"optional applet the update initramfs may lack")
     assert not re.search(r"\|\|\s*echo\s+0", code), (
         "a failed size measurement is being turned into a size of 0, which reads as a "
         "truncated file and makes the hook refuse to restore a healthy env image")
@@ -208,7 +219,7 @@ if __name__ == "__main__":
     check("user-update.sh fallback only runs without an env image", hook_fallback_runs_only_without_an_env_image)
     check("user-update.sh validates env_dualboot.bin before writing", hook_validates_the_env_blob_before_writing_it)
     check("user-update.sh only calls tools the initramfs busybox has", hook_uses_only_tools_the_initramfs_has)
-    check("user-update.sh can't read 'cannot measure' as 'empty file'", hook_cannot_mistake_an_unmeasurable_file_for_an_empty_one)
+    check("user-update.sh sizes env with only dd + [ -s ]", hook_sizes_env_with_only_guaranteed_primitives)
     check("user-update.sh is device-independent (no mmcblk0pN)", hook_is_device_independent)
     print("the gate is device-independent")
     check("gate_vars depends only on (slot, default)", gate_does_not_vary_by_device)
