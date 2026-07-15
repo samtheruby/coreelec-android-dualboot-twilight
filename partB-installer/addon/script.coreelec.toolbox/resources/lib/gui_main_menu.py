@@ -3,7 +3,7 @@ import xbmcgui
 import xbmc
 import xbmcaddon
 
-from resources.lib import bt_sync, boot_default, wifi_mac, hdr_fix
+from resources.lib import bt_sync, boot_default, wifi_mac, repair
 
 ADDON = xbmcaddon.Addon()
 
@@ -11,7 +11,7 @@ ADDON = xbmcaddon.Addon()
 MENU_ITEMS = [
     ("Sync Bluetooth remotes from Android", "bt_sync"),
     ("Set default boot OS", "boot_default"),
-    ("Fix HDR/HLG playing in SDR", "hdr_fix"),
+    ("Repair dual-boot install", "repair"),
     ("Fix WiFi MAC address", "wifi_mac"),
 ]
 
@@ -28,12 +28,13 @@ DESCRIPTIONS = {
         "the Reboot-to-CoreELEC app. If the chosen OS ever fails to boot, the device falls back "
         "to the other automatically."
     ),
-    "hdr_fix": (
-        "NEEDED ONLY on dual-boots installed before this was fixed. On the eMMC boot path the "
-        "bootloader pins HDMI to 8-bit, so HDR10/HLG content is tonemapped down to SDR. This "
-        "rewrites the boot gate to clear the pin, keeping your default boot OS unchanged. Safe "
-        "to run at any time: it checks first and does nothing if the gate is already correct. "
-        "Takes effect on the next reboot."
+    "repair": (
+        "Scan this dual-boot install for problems fixed in recent releases and repair only "
+        "the ones that are actually wrong: the eMMC boot gate (HDR pinned to SDR, display "
+        "stuck at Android's resolution/refresh, or a missing boot switch), the Dolby Vision "
+        "module, and the CoreELEC update hook. Shows what it found before changing anything, "
+        "keeps your default boot OS, and does nothing if everything is already correct. "
+        "Reboot after a fix."
     ),
     "wifi_mac": (
         "Set the CoreELEC WiFi MAC address. NEEDED ONLY on devices where CoreELEC shows a wrong "
@@ -83,7 +84,7 @@ class MainMenu(xbmcgui.WindowXMLDialog):
             bt_sync.run()
         elif action == "boot_default":
             boot_default.run()
-        elif action == "hdr_fix":
-            hdr_fix.run()
+        elif action == "repair":
+            repair.run()
         elif action == "wifi_mac":
             wifi_mac.run()
