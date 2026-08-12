@@ -101,7 +101,10 @@ def main():
     # Nothing to block on a unit without the Xiaomi updater. That is a legitimate, complete
     # outcome (the stage's goal is "no Xiaomi OTA"), not a failure -- so say so and stop,
     # rather than installing a module that can only ever no-op.
-    if PKG not in M.su(a.serial, f"pm path {PKG}")[0]:
+    # `pm path` prints the APK LOCATION, not the package name -- e.g. on the TV Box S 3rd Gen
+    # it is /system/priv-app/updateservice/updateservice.apk, which does not contain PKG. Test
+    # for empty output instead: pm path prints nothing at all for a missing package.
+    if not M.su(a.serial, f"pm path {PKG}")[0].strip():
         print(f"{PKG} is not installed on this unit -- there is no Xiaomi updater to block.")
         print("Nothing to do. (stage2a is Xiaomi-only; the generic Google TV OTA block is "
               "blockgms, installed by stage2.)")
