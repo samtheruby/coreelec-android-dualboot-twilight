@@ -14,7 +14,11 @@ if ! command -v javac >/dev/null 2>&1; then
   sudo -n apt-get update -qq
   sudo -n apt-get install -y -qq openjdk-17-jdk-headless unzip wget
 fi
-export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+# Assign then export separately: `export X="$(...)"` returns export's status, not the
+# command substitution's, so a javac that is installed but unrunnable would go unnoticed
+# and JAVA_HOME would be silently wrong (SC2155).
+JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+export JAVA_HOME
 echo "   JAVA_HOME=$JAVA_HOME"
 
 echo "== 2. Android cmdline-tools =="
