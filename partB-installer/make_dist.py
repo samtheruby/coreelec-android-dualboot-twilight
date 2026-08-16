@@ -25,6 +25,7 @@ REPO_ROOT = os.path.dirname(ROOT)           # platform-tools/ + README.md live a
 ART = os.path.join(ROOT, "artifacts")
 sys.path.insert(0, os.path.join(ROOT, "build"))
 import devices  # noqa: E402
+import addon_zip  # noqa: E402  -- pick the newest addon zip by version, not by string
 
 # Runtime modules the installer imports (layout imports devices; flash_to_coreelec
 # imports all of these). devices.py MUST ride along or the bundle fails to import.
@@ -105,11 +106,14 @@ def main():
               f"init_boot for {dev.slug} (stage_magisk will need --magisk-img)")
 
     # generic (flat) artifacts + the prebuilt CoreELEC Toolbox addon zip
-    addon_zips = sorted(glob.glob(os.path.join(ART, ADDON_ZIP_GLOB)) +
-                        glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
+    addon_zips = (glob.glob(os.path.join(ART, ADDON_ZIP_GLOB)) +
+                  glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
     if not addon_zips:
         raise SystemExit(f"missing prebuilt addon zip ({ADDON_ZIP_GLOB}) in artifacts/")
-    shutil.copy2(addon_zips[-1], os.path.join(DIST, "artifacts", os.path.basename(addon_zips[-1])))
+    # By version, not by string: "1.1.10" sorts before "1.1.2" as text, so a plain
+    # sorted()[-1] would start shipping the older addon on the first release after 1.1.9.
+    newest_zip = addon_zip.newest(addon_zips)
+    shutil.copy2(newest_zip, os.path.join(DIST, "artifacts", os.path.basename(newest_zip)))
     for f in ART_GENERIC:
         shutil.copy2(os.path.join(ART, f), os.path.join(DIST, "artifacts", f))
 

@@ -27,6 +27,7 @@ import argparse, glob, hashlib, json, os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "build"))
 import bundle  # noqa: E402  -- SHA256SUMS.txt check on the addon zip we upload
+import addon_zip  # noqa: E402  -- pick the newest addon zip by version, not by string
 
 ADDON_ID = "script.coreelec.toolbox"
 ADDONS_DIR = "/storage/.kodi/addons"
@@ -40,9 +41,10 @@ def find_zip():
     for pat in (os.path.join(HERE, "..", f"{ADDON_ID}-*.zip"),
                 os.path.join(HERE, "..", "artifacts", f"{ADDON_ID}-*.zip"),
                 os.path.join(HERE, f"{ADDON_ID}-*.zip")):
-        hit = sorted(glob.glob(pat))
+        hit = glob.glob(pat)
         if hit:
-            return hit[-1]
+            # By version, not by string: "1.1.10" sorts before "1.1.2" as text.
+            return addon_zip.newest(hit)
     return None
 
 
