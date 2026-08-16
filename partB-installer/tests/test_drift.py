@@ -15,6 +15,7 @@ Box S 3rd Gen, where stage2a printed "nothing to block" and returned success whi
 the Xiaomi OTA updater fully enabled. Once a defect has cost a real box its protection,
 the pattern is worth a permanent gate rather than a memory.
 """
+import ast
 import os
 import re
 import sys
@@ -85,9 +86,63 @@ def pm_path_is_not_tested_by_substring():
         + "\n    Test for empty output, or for the exit status, instead.")
 
 
+# --- 2. each installer and its Magisk module must act on the same things -------------------
+def py_literal(path, name):
+    """The value assigned to a module-level name, read with ast rather than regex.
+
+    A regex over source would happily match the name inside a docstring or a comment; ast
+    only sees the assignment that Python itself would execute.
+    """
+    tree = ast.parse(read(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"no module-level {name} = ... in {os.path.basename(path)}")
+
+
+def sh_var(path, name):
+    """A shell scalar or newline-separated list assigned as NAME="..." -- as a list."""
+    src = read(path)
+    m = re.search(rf'^{name}="([^"]*)"', src, re.M)
+    assert m, f"no {name}=\"...\" in {os.path.basename(path)}"
+    return [w for w in m.group(1).split() if w]
+
+
+def blockgms_components_agree():
+    """The 8 .update.* components are listed in Python and again in shell.
+
+    install_blockgms.py applies the durable disable from adb; modules/blockgms/service.sh
+    re-asserts it at every boot. Drop a component from one list only and it is disabled
+    once and then never again -- or re-asserted forever but never actually disabled. Both
+    halves keep running either way, so nothing surfaces.
+    """
+    py = py_literal(os.path.join(INSTALLER, "install_blockgms.py"), "COMPS")
+    sh = sh_var(os.path.join(MODULES, "blockgms", "service.sh"), "COMPONENTS")
+    assert set(py) == set(sh), (
+        "install_blockgms.py COMPS and modules/blockgms/service.sh COMPONENTS disagree:\n"
+        f"    only in installer: {sorted(set(py) - set(sh)) or 'none'}\n"
+        f"    only in module   : {sorted(set(sh) - set(py)) or 'none'}")
+
+
+def blockota_package_agrees():
+    """The Xiaomi updater package name, in the installer and in the boot-time module.
+
+    modules/blockota/service.sh is the only thing that puts the block back if something
+    re-enables the updater. Pointed at a package the installer never disabled, it re-asserts
+    nothing, and its log still reads as a healthy boot.
+    """
+    py = py_literal(os.path.join(INSTALLER, "install_blockota.py"), "PKG")
+    sh = sh_var(os.path.join(MODULES, "blockota", "service.sh"), "PKGS")
+    assert [py] == sh, (
+        f"install_blockota.py PKG={py!r} but modules/blockota/service.sh PKGS={sh!r}")
+
+
 if __name__ == "__main__":
     print("drift -- values written twice, and constructs known to be wrong")
     check("no installer gates on `pm path` by substring", pm_path_is_not_tested_by_substring)
+    check("blockgms component list agrees (installer vs module)", blockgms_components_agree)
+    check("blockota package agrees (installer vs module)", blockota_package_agrees)
 
     print()
     if _FAILURES:
