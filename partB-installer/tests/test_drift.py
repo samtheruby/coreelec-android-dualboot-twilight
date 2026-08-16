@@ -138,11 +138,45 @@ def blockota_package_agrees():
         f"install_blockota.py PKG={py!r} but modules/blockota/service.sh PKGS={sh!r}")
 
 
+# --- 3. MODID must match the id Magisk actually reads ------------------------------------
+def modid_matches_module_prop():
+    """Each installer's MODID is the directory it installs into; module.prop's id is what
+    Magisk calls the module. They are written independently, in two file formats.
+
+    A mismatch installs the files under one name while Magisk registers another, so
+    --verify reads an empty module dir and the uninstall instructions printed to the user
+    point at a path that does not exist.
+    """
+    bad, pairs = [], 0
+    for name in installer_sources():
+        src = read(INSTALLER, name)
+        m_id = re.search(r'^MODID\s*=\s*"([^"]+)"', src, re.M)
+        if not m_id:
+            continue
+        m_dir = re.search(r'"modules",\s*"([^"]+)"', src)
+        assert m_dir, f"{name} sets MODID but no modules/<dir> source could be found"
+        prop = os.path.join(MODULES, m_dir.group(1), "module.prop")
+        assert os.path.exists(prop), f"{name} points at {prop}, which does not exist"
+        m_prop = re.search(r"^id=(.+)$", read(prop), re.M)
+        assert m_prop, f"{prop} has no id= line"
+        pairs += 1
+        if m_id.group(1) != m_prop.group(1).strip():
+            bad.append(f"{name}: MODID={m_id.group(1)!r} but "
+                       f"modules/{m_dir.group(1)}/module.prop id={m_prop.group(1).strip()!r}")
+    # Without this the check passes vacuously the day the MODID regex stops matching.
+    modules = [d for d in os.listdir(MODULES) if os.path.isdir(os.path.join(MODULES, d))]
+    assert pairs == len(modules), (
+        f"found {pairs} installer/module pair(s) but modules/ holds {len(modules)}: "
+        f"{sorted(modules)} -- a module with no installer, or a MODID this check missed")
+    assert not bad, "installer MODID and module.prop id disagree:\n    " + "\n    ".join(bad)
+
+
 if __name__ == "__main__":
     print("drift -- values written twice, and constructs known to be wrong")
     check("no installer gates on `pm path` by substring", pm_path_is_not_tested_by_substring)
     check("blockgms component list agrees (installer vs module)", blockgms_components_agree)
     check("blockota package agrees (installer vs module)", blockota_package_agrees)
+    check("MODID matches module.prop id (every module)", modid_matches_module_prop)
 
     print()
     if _FAILURES:
