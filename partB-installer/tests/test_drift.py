@@ -25,6 +25,8 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
 INSTALLER = os.path.join(ROOT, "installer")
 MODULES = os.path.join(ROOT, "modules")
+ARTIFACTS = os.path.join(ROOT, "artifacts")
+ADDON_XML = os.path.join(ROOT, "addon", "script.coreelec.toolbox", "addon.xml")
 
 _FAILURES = []
 
@@ -171,12 +173,36 @@ def modid_matches_module_prop():
     assert not bad, "installer MODID and module.prop id disagree:\n    " + "\n    ".join(bad)
 
 
+# --- 4. the shipped addon zip must be the version addon.xml declares ----------------------
+def shipped_addon_zip_matches_addon_xml():
+    """build_toolbox_zip.py names the zip after addon.xml's <addon version>, and
+    deploy_toolbox_addon.py installs whatever zip it finds in artifacts/.
+
+    Nothing runs the build. Bump addon.xml, commit, and stage3 keeps deploying the previous
+    release -- with the new version number nowhere in sight, so the box looks up to date in
+    Kodi's addon list while running the old code.
+    """
+    xml = read(ADDON_XML)
+    m = re.search(r'<addon\b[^>]*\bversion="([^"]+)"', xml, re.S)
+    assert m, "no <addon ... version=\"...\"> in addon.xml"
+    m_id = re.search(r'<addon\b[^>]*\bid="([^"]+)"', xml, re.S)
+    assert m_id, "no <addon ... id=\"...\"> in addon.xml"
+    want = f"{m_id.group(1)}-{m.group(1)}.zip"
+    have = sorted(f for f in os.listdir(ARTIFACTS)
+                  if f.startswith(m_id.group(1) + "-") and f.endswith(".zip"))
+    assert want in have, (
+        f"addon.xml declares version {m.group(1)}, so artifacts/ should hold {want}, "
+        f"but holds: {have or 'no addon zip at all'}\n"
+        "    Rebuild it: python build/build_toolbox_zip.py")
+
+
 if __name__ == "__main__":
     print("drift -- values written twice, and constructs known to be wrong")
     check("no installer gates on `pm path` by substring", pm_path_is_not_tested_by_substring)
     check("blockgms component list agrees (installer vs module)", blockgms_components_agree)
     check("blockota package agrees (installer vs module)", blockota_package_agrees)
     check("MODID matches module.prop id (every module)", modid_matches_module_prop)
+    check("shipped addon zip matches addon.xml version", shipped_addon_zip_matches_addon_xml)
 
     print()
     if _FAILURES:
