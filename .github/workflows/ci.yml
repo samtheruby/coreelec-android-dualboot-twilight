@@ -1,0 +1,71 @@
+name: CI
+
+# Nothing here touches a device. Everything the installer does over adb or ssh is
+# unreachable from a runner, so CI covers exactly two things: that every tracked source
+# file parses, and that the offline test suite (drift checks + unit tests) passes.
+# Device behaviour stays a hardware-test responsibility -- see the PR checklist.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run every test file
+        working-directory: partB-installer
+        run: |
+          set -euo pipefail
+          ran=0
+          for t in tests/test_*.py; do
+            echo "::group::$t"
+            python3 "$t"
+            echo "::endgroup::"
+            ran=$((ran + 1))
+          done
+
+          # A test file that stops being discovered looks exactly like one that passes.
+          # Compare what ran against what is committed, so the suite cannot silently
+          # shrink -- and so this check needs no magic number to bump.
+          committed=$(git ls-files 'tests/test_*.py' | wc -l)
+          echo "ran $ran of $committed committed test file(s)"
+          if [ "$ran" -ne "$committed" ]; then
+            echo "::error::$committed test file(s) committed but $ran ran"
+            exit 1
+          fi
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint every tracked shell script
+        working-directory: partB-installer
+        run: |
+          set -euo pipefail
+          # Dispatch on the script's own shebang. Android's /system/bin/sh is mksh, so the
+          # three service.sh that run as root at boot are checked as POSIX sh, not bash --
+          # linting them as bash would wave through bashisms the device rejects.
+          rc=0
+          for f in $(git ls-files '*.sh'); do
+            case "$(head -1 "$f")" in
+              *bash*) shell=bash ;;
+              *)      shell=sh ;;
+            esac
+            echo "-- $f (-s $shell)"
+            shellcheck -s "$shell" -S warning "$f" || rc=1
+          done
+          exit $rc
