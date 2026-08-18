@@ -132,6 +132,21 @@ jobs:
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs \
             "$RUNNER_TEMP/out/RebootToCoreELEC.apk" | grep -i "SHA-256\|Signer #1 certificate DN"
 
+      # Prove the APK is one Android will actually accept, so "There was a problem
+      # parsing the package" on a device can never be blamed on the build. aapt2 reads
+      # the package the same way the platform's installer does: if the archive were
+      # truncated, unsigned, or not an APK at all, badging fails here instead of on the
+      # device. Prints the package id + versions, which is also how you tell the debug
+      # build (com.jamal2367.coreelec.debug) from a release one at a glance.
+      - name: verify the APK parses
+        run: |
+          set -euo pipefail
+          apk="$RUNNER_TEMP/out/RebootToCoreELEC.apk"
+          "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" \
+            | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|^application-label:"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk"
+          echo "APK parses, is signed, and is installable."
+
       - uses: actions/upload-artifact@v4
         with:
           name: RebootToCoreELEC-apk-${{ github.sha }}
