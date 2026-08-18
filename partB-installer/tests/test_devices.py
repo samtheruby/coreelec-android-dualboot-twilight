@@ -12,6 +12,7 @@ sysfs:lnk_file read -- no generic sysfs:file read). The reader therefore got an
 empty string and died with IndexError instead of failing closed.
 """
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -191,6 +192,24 @@ def test_userdata_size_rejects_the_other_device():
     assert not STICK.userdata_size_ok(BOX.carved_userdata_bytes)
     assert not BOX.userdata_size_ok(STICK.stock_userdata_bytes)
     assert not BOX.userdata_size_ok(STICK.carved_userdata_bytes)
+
+
+def test_envgate_kt_mirrors_the_registry():
+    """The Android app's EnvGate.kt re-asserts the boot gate on-device, and guards that
+    write with its own copy of model -> eMMC sectors (it cannot import this module). That
+    copy is the fail-closed check standing between a wrong unit and a bootloader env
+    write, so it must not drift from the registry it mirrors."""
+    kt = os.path.join(HERE, "..", "app", "RebootToCoreELEC", "app", "src", "main", "java",
+                      "com", "jamal2367", "coreelec", "EnvGate.kt")
+    src = open(kt, encoding="utf-8").read()
+    m = re.search(r"KNOWN_DEVICES\s*=\s*mapOf\((.*?)\n\s*\)", src, re.S)
+    assert m, "EnvGate.kt no longer declares KNOWN_DEVICES"
+    got = {k: int(v.replace("_", ""))
+           for k, v in re.findall(r'"([^"]+)"\s+to\s+([0-9_]+)L', m.group(1))}
+    want = {d.model: d.total_sectors for d in devices.DEVICES}
+    assert got == want, (
+        f"EnvGate.kt KNOWN_DEVICES has drifted from the registry:\n"
+        f"    EnvGate.kt: {got}\n    devices.py: {want}")
 
 
 def test_parse_fastboot_getvar_size():

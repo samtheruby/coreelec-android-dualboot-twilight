@@ -5,12 +5,14 @@ Dependency-free on purpose: run it directly.
 
     python tests/test_boot_gate.py
 
-The bug these guard against: the gate is not written in one place. It is written in FOUR,
+The bug these guard against: the gate is not written in one place. It is written in FIVE,
 each on a different machine, in a different language:
 
   build/envtool.py            the PC installer (stage1, stage2, finish_install)
   addon/.../envcodec.py       the Kodi addon, running on CoreELEC ("Set default boot OS")
   app/.../EnvFlip.kt          the Android switcher app (flips boot_ce)
+  app/.../EnvGate.kt          the Android switcher app's in-app re-assert (writes the WHOLE
+                              gate, and ENV_ADDITIONS, after a CoreELEC update stomps bootcmd)
   payload/flash/user-update.sh  the CoreELEC OS-update hook, in the initramfs
 
 Nothing makes them agree. Change `bootcmd` in envtool.py and the addon keeps writing the
@@ -21,6 +23,7 @@ They are also DEVICE-INDEPENDENT: stick and box run the same SoC and the same u-
 gate_vars() takes a slot and a default and nothing else. A gate that varied by device would
 be a bug in itself, so that is asserted too.
 """
+import json
 import os
 import re
 import sys
@@ -34,8 +37,12 @@ import envtool    # noqa: E402  -- the PC-side codec
 import envcodec   # noqa: E402  -- the addon's copy that runs on CoreELEC
 
 HOOK = os.path.join(ROOT, "payload", "flash", "user-update.sh")
-KOTLIN = os.path.join(ROOT, "app", "RebootToCoreELEC", "app", "src", "main", "java",
-                      "com", "jamal2367", "coreelec", "EnvFlip.kt")
+_KT = os.path.join(ROOT, "app", "RebootToCoreELEC", "app", "src", "main", "java",
+                   "com", "jamal2367", "coreelec")
+KOTLIN = os.path.join(_KT, "EnvFlip.kt")
+ENVGATE_KT = os.path.join(_KT, "EnvGate.kt")
+ENVADD_KT = os.path.join(_KT, "EnvAdditions.kt")
+ADDITIONS_JSON = os.path.join(ROOT, "refdata", "env_additions.json")
 
 SLOTS = ("_a", "_b")
 DEFAULTS = ("android", "coreelec")
@@ -87,6 +94,110 @@ def env_size_agrees():
     assert m, "could not find ENV_SIZE in EnvFlip.kt"
     assert int(m.group(1), 16) == envtool.ENV_SIZE, (
         f"EnvFlip.kt ENV_SIZE={m.group(1)} != envtool {envtool.ENV_SIZE:#x}")
+
+
+# --- 1b. EnvGate.kt (the Android app's in-app re-assert) ---------------------------------
+# EnvFlip.kt only flips boot_ce, so it never had to know the gate STRINGS. EnvGate.kt does:
+# it rewrites bootcefromemmc/bootcmd on-device after a CoreELEC update stomps them, which
+# makes it a fifth writer of the exact bytes u-boot executes -- in a language none of the
+# other four are in, on the one machine that cannot be re-flashed from a PC if it is wrong.
+# Kotlin cannot be imported, so the literals are extracted from the source and compared.
+
+def _kt_source(path):
+    """File contents with comments stripped -- prose inside a comment is often quoted
+    (e.g. CoreELEC's "reboot to eMMC/nand") and would otherwise be read as a literal."""
+    src = open(path, encoding="utf-8").read()
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", src, flags=re.M)
+
+
+def _kt_str(expr):
+    """Value of a Kotlin string expression built by `+`-concatenating literals."""
+    parts = re.findall(r'"((?:[^"\\]|\\.)*)"', expr)
+    return "".join(parts).replace('\\"', '"').replace("\\$", "$").replace("\\\\", "\\")
+
+
+def envgate_kt_gate_matches_envtool():
+    """The gate EnvGate.kt writes must be byte-identical to envtool.gate_vars, for every
+    slot x default. A single byte of drift is a different bootcmd on a device that has
+    already booted CoreELEC once -- i.e. a box that stops switching, or stops booting."""
+    src = _kt_source(ENVGATE_KT)
+    m = re.search(r"fun bootCeFromEmmc\(ceSlot: String\): String =(.*?)\n\n", src, re.S)
+    assert m, "could not find bootCeFromEmmc() in EnvGate.kt"
+    tpl = _kt_str(m.group(1))
+    m = re.search(r"fun bootCmd\(default: String\): String =(.*?)\n\s*\}\n", src, re.S)
+    assert m, "could not find bootCmd() in EnvGate.kt"
+    assert "} else {" in m.group(1), "bootCmd() no longer has both default branches"
+    ce_branch, android_branch = m.group(1).split("} else {")
+
+    for slot in SLOTS:
+        for dflt in DEFAULTS:
+            want = envtool.gate_vars(slot, dflt)
+            got = {"bootcefromemmc": tpl.replace("$ceSlot", slot),
+                   "bootcmd": _kt_str(ce_branch if dflt == "coreelec" else android_branch)}
+            for k, v in got.items():
+                assert v == want[k], (
+                    f"EnvGate.kt {k} has drifted from envtool.gate_vars"
+                    f"(slot={slot}, default={dflt}):\n    EnvGate.kt: {v}\n    envtool   : {want[k]}")
+    # the slot must actually be substituted, or every unit gets the same (wrong) gate
+    assert "$ceSlot" in tpl, "bootCeFromEmmc() no longer interpolates the CE slot"
+
+
+def envgate_kt_additions_mirror_the_json():
+    """EnvAdditions.kt is a hand-regenerated mirror of refdata/env_additions.json (the app
+    cannot read the installer's refdata). Order matters too: both feed a LinkedHashMap /
+    ordered dict straight into serialize(), so a reordering is a different 64 KiB blob."""
+    kt = _kt_source(ENVADD_KT)
+    assert "linkedMapOf(" in kt, "EnvAdditions.kt no longer defines a linkedMapOf"
+    body = kt.split("linkedMapOf(", 1)[1]
+    pairs = re.findall(r'"([A-Za-z0-9_]+)" to ((?:\s*"(?:[^"\\]|\\.)*"\s*\+?)+),', body)
+    got = {k: _kt_str(v) for k, v in pairs}
+    want = json.load(open(ADDITIONS_JSON, encoding="utf-8"))
+
+    assert list(got) == list(want), (
+        f"EnvAdditions.kt key ORDER differs from env_additions.json:\n"
+        f"    EnvAdditions.kt   : {list(got)}\n    env_additions.json: {list(want)}")
+    for k in want:
+        assert got[k] == want[k], (
+            f"EnvAdditions.kt {k} has drifted from env_additions.json:\n"
+            f"    EnvAdditions.kt   : {got[k]}\n    env_additions.json: {want[k]}")
+    # the identity guard build_env.generic_additions() applies, applied here too
+    for k in got:
+        assert k not in build_env_identity_keys(), f"EnvAdditions.kt carries identity var {k}"
+
+
+def build_env_identity_keys():
+    import build_env
+    return build_env.IDENTITY_KEYS
+
+
+def envgate_kt_never_writes_identity():
+    """EnvGate.kt edits the device's OWN env in place, so identity must be listed and
+    guarded exactly as build_env does it -- a transplanted serial/MAC is not recoverable."""
+    src = _kt_source(ENVGATE_KT)
+    m = re.search(r"IDENTITY_KEYS\s*=\s*listOf\((.*?)\)", src, re.S)
+    assert m, "EnvGate.kt no longer declares IDENTITY_KEYS"
+    got = re.findall(r'"([^"]+)"', m.group(1))
+    want = build_env_identity_keys()
+    assert got == want, (
+        f"EnvGate.kt IDENTITY_KEYS has drifted from build_env.IDENTITY_KEYS:\n"
+        f"    EnvGate.kt: {got}\n    build_env : {want}")
+
+
+def envgate_kt_repairs_a_stomped_bootcmd_without_guessing():
+    """THE regression this whole path exists for: a CoreELEC update rewrites bootcmd to a
+    stock one that drops the boot_ce test, while bootcefromemmc survives. reassert_env_gate.py
+    branches on `if ce_slot:` -- slot READ, nothing inferred. If EnvGate.reassert() instead
+    branches on the fully-wired flag, that exact (and most common) case falls through to the
+    rebuild path, which INFERS the CE slot from the inactive Android slot and prompts the
+    user -- a guess, where the answer was sitting in bootcefromemmc all along."""
+    src = _kt_source(ENVGATE_KT)
+    m = re.search(r"if \((state\.[A-Za-z]+)[^)]*\) \{\s*\n(?:.*?)ceSlot = state\.ceSlot", src, re.S)
+    assert m, "could not find the repair-strategy branch in EnvGate.reassert()"
+    assert m.group(1) == "state.ceSlot", (
+        f"EnvGate.reassert() picks its repair strategy on `{m.group(1)}`, not `state.ceSlot`. "
+        f"A CoreELEC update that stomps bootcmd but leaves bootcefromemmc intact would then "
+        f"take the rebuild path and INFER the CE slot instead of reading it.")
 
 
 # --- 2. the update hook ------------------------------------------------------------------
@@ -211,10 +322,15 @@ def both_defaults_are_distinguishable():
 
 
 if __name__ == "__main__":
-    print("boot gate -- drift between the four places it is written")
+    print("boot gate -- drift between the five places it is written")
     check("envtool.gate_vars == envcodec.gate_vars (all slots x defaults)", gate_vars_identical)
     check("both codecs parse/serialize identically", codec_roundtrip_identical)
     check("ENV_SIZE agrees across envtool / envcodec / EnvFlip.kt", env_size_agrees)
+    check("EnvGate.kt gate == envtool.gate_vars (all slots x defaults)", envgate_kt_gate_matches_envtool)
+    check("EnvAdditions.kt == refdata/env_additions.json (values + order)", envgate_kt_additions_mirror_the_json)
+    check("EnvGate.kt IDENTITY_KEYS == build_env.IDENTITY_KEYS", envgate_kt_never_writes_identity)
+    check("EnvGate.kt repairs a stomped bootcmd without inferring the slot",
+          envgate_kt_repairs_a_stomped_bootcmd_without_guessing)
     check("user-update.sh fallback bootcmd == envtool(android)", hook_fallback_bootcmd_is_a_real_gate)
     check("user-update.sh fallback only runs without an env image", hook_fallback_runs_only_without_an_env_image)
     check("user-update.sh validates env_dualboot.bin before writing", hook_validates_the_env_blob_before_writing_it)
