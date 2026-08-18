@@ -71,18 +71,40 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # A debug APK is signed with an auto-generated ~/.android/debug.keystore. On a
-      # fresh runner that key is NEW every run, so each CI build would refuse to install
-      # over the previous one (INSTALL_FAILED_UPDATE_INCOMPATIBLE) and you would have to
-      # uninstall the app before every update. Caching it under a constant key keeps one
-      # stable debug identity across builds. A debug keystore holds no secret -- its
-      # password is the fixed, public "android" -- and it can only sign debug builds.
-      # If the cache is ever evicted the key changes, and you uninstall once.
-      - name: keep a stable debug signing key
+      # A debug APK is signed with ~/.android/debug.keystore. On a fresh runner that key
+      # is NEW every run, so each CI build would refuse to install over the previous one
+      # (INSTALL_FAILED_UPDATE_INCOMPATIBLE) and you would have to uninstall the app
+      # before every update. Caching it under a constant key keeps one stable debug
+      # identity across builds. A debug keystore holds no secret -- its password is the
+      # fixed, public "android" -- and it can only sign debug builds. If the cache is
+      # ever evicted the key changes, and you uninstall once.
+      - name: restore the debug signing key
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: debug-keystore-v1
+
+      # Create it ourselves on a cache miss, with the standard debug credentials, rather
+      # than letting the build generate one. AGP creates the keystore during signing,
+      # which is AFTER the cache step has validated its path -- so the post-run save
+      # found nothing ("Path Validation Error ... no cache is being saved") and the key
+      # was never actually stable. Making the file exist up front fixes that, and AGP
+      # reuses an existing keystore instead of generating one.
+      - name: create the debug signing key if not cached
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          if [ -f ~/.android/debug.keystore ]; then
+            echo "restored from cache"
+          else
+            keytool -genkeypair \
+              -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "generated a new debug key"
+          fi
 
       - name: assembleDebug
         working-directory: partB-installer/app/RebootToCoreELEC
@@ -104,6 +126,11 @@ jobs:
           cp "$src" "$RUNNER_TEMP/out/RebootToCoreELEC.apk"
           echo "built:  $src"
           sha256sum "$RUNNER_TEMP/out/RebootToCoreELEC.apk"
+          # The signer identity decides whether this APK installs OVER the one already on
+          # the device or demands an uninstall first. Print it: if this fingerprint is the
+          # same as the previous build's, `adb install -r` will just work.
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs \
+            "$RUNNER_TEMP/out/RebootToCoreELEC.apk" | grep -i "SHA-256\|Signer #1 certificate DN"
 
       - uses: actions/upload-artifact@v4
         with:
