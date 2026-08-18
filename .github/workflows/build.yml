@@ -1,0 +1,112 @@
+# Build the switcher APK and run the drift tests.
+#
+# The APK is the one artifact of this repo that cannot be produced by reading the
+# source: it needs JDK 17 + the Android SDK, which is why app/build_apk.sh exists to
+# provision both under WSL. This workflow does the same on a runner, so a working APK
+# can be downloaded straight onto a phone or the device itself, with no PC involved.
+#
+# The tests are the dependency-free suites under partB-installer/tests. They are cheap
+# and they guard cross-file drift (the boot gate is written in five places, in five
+# languages), so they run on every push and PR with no path filter -- a filter that
+# missed one of those five files would let exactly the drift they exist to catch slip
+# through unguarded.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets you build an APK from any branch by hand: Actions -> Build -> Run workflow.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: drift tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Each suite is a plain script with its own runner and exit code (no pytest, by
+      # design -- they must run on a bare machine). Run them all before failing, so one
+      # broken suite does not hide the state of the others.
+      - name: run the test suites
+        working-directory: partB-installer
+        run: |
+          set -u
+          fail=0
+          for t in tests/test_*.py; do
+            echo "::group::$t"
+            python3 "$t" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  apk:
+    name: build APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'          # app/build.gradle pins source/target to 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: install SDK packages
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # A debug APK is signed with an auto-generated ~/.android/debug.keystore. On a
+      # fresh runner that key is NEW every run, so each CI build would refuse to install
+      # over the previous one (INSTALL_FAILED_UPDATE_INCOMPATIBLE) and you would have to
+      # uninstall the app before every update. Caching it under a constant key keeps one
+      # stable debug identity across builds. A debug keystore holds no secret -- its
+      # password is the fixed, public "android" -- and it can only sign debug builds.
+      # If the cache is ever evicted the key changes, and you uninstall once.
+      - name: keep a stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      - name: assembleDebug
+        working-directory: partB-installer/app/RebootToCoreELEC
+        run: |
+          # gradlew is tracked mode 100644, so restore the exec bit -- build_apk.sh does
+          # the same. (.gitattributes already forces its line endings to LF.)
+          chmod +x gradlew
+          ./gradlew --no-daemon clean assembleDebug
+
+      # Rename to the filename install.py looks for, so the download can be dropped
+      # straight into partB-installer/artifacts/ and used as-is.
+      - name: stage the APK
+        working-directory: partB-installer/app/RebootToCoreELEC
+        run: |
+          set -euo pipefail
+          src=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          [ -n "$src" ] || { echo "no APK was produced"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$src" "$RUNNER_TEMP/out/RebootToCoreELEC.apk"
+          echo "built:  $src"
+          sha256sum "$RUNNER_TEMP/out/RebootToCoreELEC.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RebootToCoreELEC-apk-${{ github.sha }}
+          path: ${{ runner.temp }}/out/RebootToCoreELEC.apk
+          if-no-files-found: error
