@@ -37,9 +37,9 @@ jobs:
     name: drift tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -69,19 +69,19 @@ jobs:
     name: build APK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'          # app/build.gradle pins source/target to 17
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: install SDK packages
         run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # A debug APK is signed with ~/.android/debug.keystore. On a fresh runner that key
       # is NEW every run, so each CI build would refuse to install over the previous one
@@ -91,7 +91,7 @@ jobs:
       # fixed, public "android" -- and it can only sign debug builds. If the cache is
       # ever evicted the key changes, and you uninstall once.
       - name: restore the debug signing key
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.android/debug.keystore
           key: debug-keystore-v1
@@ -175,7 +175,7 @@ jobs:
             echo "APK version does not match build.gradle -- refusing to ship it"; exit 1; }
           echo "APK parses, is signed, is installable, and matches build.gradle."
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: RebootToCoreELEC-apk-${{ github.sha }}
           path: ${{ runner.temp }}/out/RebootToCoreELEC.apk

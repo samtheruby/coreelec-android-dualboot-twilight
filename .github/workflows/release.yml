@@ -47,8 +47,8 @@ jobs:
       nightly: ${{ steps.r.outputs.nightly }}
       samurihl: ${{ steps.r.outputs.samurihl }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - id: r
@@ -83,8 +83,8 @@ jobs:
     outputs:
       version: ${{ steps.b.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - id: b
@@ -94,7 +94,7 @@ jobs:
           python3 build/build_toolbox_zip.py
           z=$(ls artifacts/script.coreelec.toolbox-*.zip)
           echo "version=$(basename "$z" .zip | sed 's/^script\.coreelec\.toolbox-//')" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: toolbox
           path: partB-installer/artifacts/script.coreelec.toolbox-*.zip
@@ -110,8 +110,8 @@ jobs:
         device: [stick, box]
         flavour: [nightly, samurihl]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -120,11 +120,11 @@ jobs:
       - name: install image tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq mtools dosfstools e2fsprogs util-linux
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: RebootToCoreELEC-apk-${{ github.sha }}
           path: partB-installer/artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: toolbox, path: partB-installer/artifacts }
 
       - name: fetch the CoreELEC payload
@@ -157,7 +157,7 @@ jobs:
             python3 make_dist.py --device ${{ matrix.device }}
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.device }}-${{ matrix.flavour }}
           path: partB-installer/partB-installer-*-dist.zip
@@ -168,7 +168,7 @@ jobs:
     needs: [resolve, toolbox, bundles]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: dl }
       - name: collect the six assets
         run: |
