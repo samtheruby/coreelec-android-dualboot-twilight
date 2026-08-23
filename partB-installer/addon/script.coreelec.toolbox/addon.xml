@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="script.coreelec.toolbox"
        name="CoreELEC Toolbox"
-       version="1.1.2"
+       version="1.1.3"
        provider-name="cavecrew">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
@@ -12,6 +12,20 @@
         <description>Utilities for an Amlogic CoreELEC + Android internal dual-boot: sync Bluetooth remotes paired in Android over to CoreELEC (no re-pairing), choose which OS boots by default, and fix the WiFi MAC if CoreELEC shows a wrong/shared default. Generic to Amlogic CoreELEC boxes.</description>
         <platform>all</platform>
         <news>
+v1.1.3
+- New Repair check: "CoreELEC kernel image". u-boot boots CoreELEC from the boot_a/boot_b
+  partition, not from /flash, and the update hook copies /flash/kernel.img across with a dd it
+  has no way to verify. On one box that dd stopped 659,456 bytes short and still reported
+  success: the kernel matched, the tail of the compressed ramdisk was left over from the
+  previous kernel, and CoreELEC panicked on a missing /init on every boot while the boot gate
+  was perfectly healthy. Repair now compares the whole image and rewrites it from
+  /flash/kernel.img when they differ, verifying by reading the partition back.
+- The bundled update hook now flushes /flash before it reads kernel.img and holds dd to the
+  byte count the source implies, instead of trusting its exit status. Run Repair once to put
+  the new hook on disk.
+- Repair will not copy a /flash/kernel.img that fails the kernel.img.md5 CoreELEC ships beside
+  it -- that would write the corruption onto the partition the box actually boots.
+
 v1.1.2
 - Fix: the CoreELEC update hook (user-update.sh) refused to restore the boot gate on some boxes,
   logging "cannot measure env_dualboot.bin (no stat, no ls+awk)". It sized the 64 KiB env image

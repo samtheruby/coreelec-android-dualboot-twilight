@@ -2,6 +2,7 @@
 """Detection tests for the Toolbox repair suite. Dependency-free: python tests/test_repair.py"""
 import hashlib
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -164,6 +165,43 @@ def kernel_image_honours_a_matching_shipped_md5():
     assert r.status == rc.OK, r
 
 
+REPAIR_PY = os.path.join(ROOT, "addon", "script.coreelec.toolbox", "resources", "lib", "repair.py")
+
+
+def every_check_the_scan_runs_has_a_fixer():
+    """repair.py imports xbmc, so it cannot be imported here -- but the one thing that must not
+    drift is checkable from the source: every check id scan() can return must have an entry in
+    FIXERS. Adding a detection without its fix means Repair lists the problem, the user presses
+    "Fix", and FIXERS[r.id] raises KeyError. (check_kernel_image shipped exactly that way for a
+    few minutes.) The reverse also matters: a fixer nothing scans for is dead code."""
+    src = open(REPAIR_PY, encoding="utf-8").read()
+    fixers = set(re.findall(r'^\s*"([a-z_]+)":', src[src.index("FIXERS = {"):], re.M))
+
+    scanned = set(re.findall(r'rc\.check_file\(\s*"([a-z_]+)"', src))
+    # The dedicated checks own their id, so ask repair_core rather than restating it here.
+    if "rc.check_boot_gate(" in src:
+        scanned.add(rc.check_boot_gate(b"", None).id)
+    if "rc.check_kernel_image(" in src:
+        scanned.add(rc.check_kernel_image(None, b"x").id)
+
+    assert scanned, "no checks found in repair.py -- the parse is wrong, not the code"
+    assert not (scanned - fixers), (
+        f"scan() can report {sorted(scanned - fixers)} but FIXERS has no entry, so pressing "
+        f"'Fix' raises KeyError")
+    assert not (fixers - scanned), (
+        f"FIXERS has {sorted(fixers - scanned)} that nothing scans for")
+
+
+def kernel_image_check_is_actually_wired_into_the_scan():
+    """The detection is worthless sitting in repair_core unused."""
+    src = open(REPAIR_PY, encoding="utf-8").read()
+    scan = src[src.index("def scan("):src.index("def _summary(")]
+    assert "rc.check_kernel_image(" in scan, "scan() does not run the kernel image check"
+    assert "kernel.img.md5" in scan, (
+        "the scan does not pass the shipped checksum, so a corrupt /flash/kernel.img would be "
+        "reported as a stale boot partition and 'repaired' by copying it")
+
+
 def bundled_hook_matches_payload():
     a = open(os.path.join(REPAIR_DIR, "user-update.sh"), "rb").read()
     b = open(os.path.join(ROOT, "payload", "flash", "user-update.sh"), "rb").read()
@@ -187,6 +225,8 @@ if __name__ == "__main__":
     check("kernel image missing source -> UNKNOWN", kernel_image_missing_source_is_unknown)
     check("kernel image corrupt source -> UNKNOWN", kernel_image_corrupt_source_is_unknown_not_needs_fix)
     check("kernel image matching shipped md5 -> OK", kernel_image_honours_a_matching_shipped_md5)
+    check("every check the scan runs has a fixer", every_check_the_scan_runs_has_a_fixer)
+    check("kernel image check is wired into scan()", kernel_image_check_is_actually_wired_into_the_scan)
     check("bundled dovi.ko == pinned sha256", bundled_dovi_matches_pin)
     check("bundled user-update.sh == payload copy", bundled_hook_matches_payload)
     print()

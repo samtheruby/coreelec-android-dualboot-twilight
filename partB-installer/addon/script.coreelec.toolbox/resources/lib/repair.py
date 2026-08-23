@@ -1,5 +1,6 @@
 # repair.py -- "Repair dual-boot install": scan the box, fix only what is stale.
 # Detection lives in repair_core (pure). This layer does dialogs + device writes.
+import hashlib
 import os
 import subprocess
 
@@ -36,6 +37,38 @@ def _bundled(name):
         return f.read()
 
 
+def _read_n(path, n):
+    """First n bytes of path, or None unless exactly n came back."""
+    try:
+        with open(path, "rb") as f:
+            b = f.read(n)
+    except OSError:
+        return None
+    return b if len(b) == n else None
+
+
+def _read_text(path):
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _ce_slot(env):
+    """'_a' / '_b' from the live gate, or None when this is not a dual-boot install."""
+    if not env:
+        return None
+    try:
+        return envcodec.detect_ce_slot(envcodec.parse(env))
+    except Exception:  # noqa: BLE001 -- a malformed env is "no slot", not a crash
+        return None
+
+
+def _boot_dev(slot):
+    return f"/dev/block/by-name/boot{slot}"
+
+
 def scan():
     """Return a list of CheckResult. Side-effect free."""
     env = _read("/dev/env")
@@ -44,6 +77,18 @@ def scan():
                                  _read(DOVI), _bundled("dovi.ko")))
     results.append(rc.check_file("update_hook", "CoreELEC update hook",
                                  _read(HOOK), _bundled("user-update.sh")))
+    # u-boot boots from boot_<slot>, not /flash, and the update hook keeps the two in sync with
+    # a dd it cannot verify (no cmp, no md5sum in that initramfs). When that dd came up short on
+    # a real stick the kernel panicked on a ramdisk it could not unpack. Only meaningful on a
+    # dual-boot install -- otherwise check_boot_gate already says "not a dual-boot install" and
+    # a second row saying the same is noise.
+    slot = _ce_slot(env)
+    if slot:
+        ki = _read(f"{FLASH}/kernel.img")
+        results.append(rc.check_kernel_image(
+            _read_n(_boot_dev(slot), len(ki)) if ki else None,
+            ki,
+            _read_text(f"{FLASH}/kernel.img.md5")))
     return results
 
 
@@ -89,10 +134,39 @@ def _fix_file(dst, bundled_name, mode=None):
         raise IOError(f"{dst} did not match after write")
 
 
+def _fix_kernel_image():
+    """Redo the copy the update hook botched: /flash/kernel.img -> boot_<slot>.
+
+    One direction only. /flash is the source and is never written; the destination is the raw
+    boot partition u-boot reads. Refuses to run from a kernel.img that fails the md5 CoreELEC
+    ships beside it -- that would put the corruption where it actually matters -- and verifies
+    by reading the partition back, because the whole bug being fixed here is a dd that exited 0
+    after a short write.
+    """
+    slot = _ce_slot(_read("/dev/env"))
+    if not slot:
+        raise RuntimeError("no CoreELEC gate in the env -- cannot tell which slot to write")
+    data = _read(f"{FLASH}/kernel.img")
+    if not data:
+        raise IOError("no /flash/kernel.img to repair from")
+    shipped = _read_text(f"{FLASH}/kernel.img.md5")
+    if shipped and hashlib.md5(data).hexdigest() != shipped.split()[0].strip().lower():
+        raise IOError("/flash/kernel.img fails its own kernel.img.md5 -- refusing to copy it")
+    dev = _boot_dev(slot)
+    with open(dev, "r+b") as f:          # r+b: never truncate a block device
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    subprocess.run(["sync"], check=False)
+    if _read_n(dev, len(data)) != data:
+        raise IOError(f"{dev} does not match /flash/kernel.img after the write")
+
+
 FIXERS = {
     "boot_gate": _fix_boot_gate,
     "dovi_ko": lambda: _fix_file(DOVI, "dovi.ko"),
     "update_hook": lambda: _fix_file(HOOK, "user-update.sh", 0o755),
+    "kernel_image": _fix_kernel_image,
 }
 
 
