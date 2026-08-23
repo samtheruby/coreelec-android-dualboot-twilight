@@ -18,7 +18,7 @@ Bundle layout (mirrors the repo so the driver's imports work unchanged):
     platform-tools/  adb.exe fastboot.exe + DLLs (bundled; PATH-prepended at runtime)
     README.md  SHA256SUMS.txt
 """
-import os, glob, shutil, gzip, zipfile, hashlib, argparse, sys
+import os, glob, shutil, gzip, zipfile, hashlib, argparse, json, re, sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(ROOT)           # platform-tools/ + README.md live at the repo root
@@ -61,6 +61,11 @@ def main():
     ap = argparse.ArgumentParser(description="Assemble a per-device installer bundle.")
     ap.add_argument("--device", default="stick", choices=list(devices.BY_SLUG),
                     help="which device to bundle (default: stick)")
+    # The SamuriHL bundles are this same bundle with a different CoreELEC image and kernel
+    # baked into ce_flash.img -- same APK, same Toolbox, same installer. The suffix keeps the
+    # two apart as release assets: partB-installer-<slug>-SamuriHL-dist.zip.
+    ap.add_argument("--suffix", default="",
+                    help="tag appended to the zip name, e.g. --suffix SamuriHL")
     args = ap.parse_args()
     dev = devices.BY_SLUG[args.device]
     art_dev = os.path.join(ART, dev.slug)              # artifacts/<slug>/ (per-device flashables)
@@ -105,11 +110,32 @@ def main():
               f"init_boot for {dev.slug} (stage_magisk will need --magisk-img)")
 
     # generic (flat) artifacts + the prebuilt CoreELEC Toolbox addon zip
-    addon_zips = sorted(glob.glob(os.path.join(ART, ADDON_ZIP_GLOB)) +
-                        glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB)))
+    # Ship the addon version addon.xml declares -- nothing else. This used to take
+    # sorted(...)[-1] of everything matching the glob, which is a LEXICAL sort: with a stale
+    # zip left in artifacts/ (one is committed, so there always is one) 1.1.9 beats 1.1.10,
+    # and the bundle quietly ships the old addon under a new release number.
+    want = re.search(r'<addon\b[^>]*\bversion="([^"]+)"',
+                     open(os.path.join(ROOT, "addon", "script.coreelec.toolbox", "addon.xml"),
+                          encoding="utf-8").read()).group(1)
+    addon_zips = sorted(set(glob.glob(os.path.join(ART, ADDON_ZIP_GLOB)) +
+                            glob.glob(os.path.join(ROOT, ADDON_ZIP_GLOB))))
     if not addon_zips:
         raise SystemExit(f"missing prebuilt addon zip ({ADDON_ZIP_GLOB}) in artifacts/")
-    shutil.copy2(addon_zips[-1], os.path.join(DIST, "artifacts", os.path.basename(addon_zips[-1])))
+    wanted_name = f"script.coreelec.toolbox-{want}.zip"
+    match = [z for z in addon_zips if os.path.basename(z) == wanted_name]
+    if not match:
+        raise SystemExit(
+            f"addon.xml declares version {want}, but no {wanted_name} was built.\n"
+            f"  found: {[os.path.basename(z) for z in addon_zips]}\n"
+            f"  run: python build/build_toolbox_zip.py")
+    stale = [os.path.basename(z) for z in addon_zips if os.path.basename(z) != wanted_name]
+    if stale:
+        # Refuse rather than pick: which one ends up in the bundle decides what users install.
+        raise SystemExit(
+            f"addon zips other than {wanted_name} are present: {stale}\n"
+            f"  remove them so the bundle cannot ship a stale addon.")
+    shutil.copy2(match[0], os.path.join(DIST, "artifacts", wanted_name))
+    print(f"  Toolbox addon: {want}")
     for f in ART_GENERIC:
         shutil.copy2(os.path.join(ART, f), os.path.join(DIST, "artifacts", f))
 
@@ -156,6 +182,21 @@ def main():
     # user-facing doc; the old generated INSTALL.md was redundant and was removed).
     shutil.copy2(os.path.join(REPO_ROOT, "README.md"), os.path.join(DIST, "README.md"))
 
+    # CE_BUILD.txt -- which CoreELEC image is baked into this bundle's ce_flash.img.
+    # Written by build/fetch_ce_payload.py. Without it a nightly bundle and a SamuriHL bundle
+    # are indistinguishable once unzipped, and neither says which build it carries.
+    meta_path = os.path.join(ROOT, "payload", "ce_build.json")
+    ce_meta = None
+    if os.path.exists(meta_path):
+        ce_meta = json.load(open(meta_path))
+        with open(os.path.join(DIST, "CE_BUILD.txt"), "w", newline="\n") as f:
+            f.write(f"source: {ce_meta['source']}\nbuild:  {ce_meta['build']}\n"
+                    f"image:  {ce_meta['image']}\nurl:    {ce_meta['url']}\n")
+        print(f"  CoreELEC build: {ce_meta['build']}")
+    else:
+        print("  WARNING: no payload/ce_build.json -- bundle will not record which CoreELEC "
+              "build it carries (run build/fetch_ce_payload.py to produce it)")
+
     # SHA256SUMS
     lines = []
     for r, _, fs in os.walk(DIST):
@@ -166,7 +207,8 @@ def main():
     open(os.path.join(DIST, "SHA256SUMS.txt"), "w", newline="\n").write("\n".join(lines) + "\n")
 
     # zip -> partB-installer-<slug>-dist.zip (internal root: partB-installer/)
-    zpath = os.path.join(ROOT, f"partB-installer-{dev.slug}-dist.zip")
+    tag = f"-{args.suffix}" if args.suffix else ""
+    zpath = os.path.join(ROOT, f"partB-installer-{dev.slug}{tag}-dist.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:   # images already gz
         for r, _, fs in os.walk(DIST):
             for f in fs:

@@ -1,0 +1,207 @@
+# Cut a release. Every release ships the SAME six assets, even when only one changed:
+#
+#   partB-installer-stick-dist.zip            latest CoreELEC nightly
+#   partB-installer-box-dist.zip              latest CoreELEC nightly
+#   partB-installer-stick-SamuriHL-dist.zip   latest SamuriHL DV fork pre-release
+#   partB-installer-box-SamuriHL-dist.zip     latest SamuriHL DV fork pre-release
+#   script.coreelec.toolbox-<ver>.zip
+#   RebootToCoreELEC.apk
+#
+# The SamuriHL bundles differ from the nightly ones ONLY in the CoreELEC image and kernel baked
+# into ce_flash.img -- same APK, same Toolbox, same installer, built once here and handed to
+# every bundle job so they cannot drift.
+#
+# Until now the dist zips could only be built on a machine that already had a CoreELEC payload
+# in payload/flash (pulled over SSH from a running box by installer/pull_coreelec_payload.py).
+# build/fetch_ce_payload.py takes those files straight out of a published image instead, so a
+# release is reproducible from the repo plus two URLs.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v1.3.2'
+        required: true
+      ce_nightly:
+        description: "CoreELEC nightly: 'latest' or an 8-digit date like 20260823"
+        default: latest
+      samurihl:
+        description: "SamuriHL build: 'latest' or a tag like v22.0-samurihl-20260812171608"
+        default: latest
+      draft:
+        description: 'Create the release as a draft'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Pin both CoreELEC versions ONCE. Resolving 'latest' independently in each bundle job would
+  # let a nightly landing mid-run produce four bundles that disagree about what they contain.
+  resolve:
+    name: resolve CoreELEC versions
+    runs-on: ubuntu-latest
+    outputs:
+      nightly: ${{ steps.r.outputs.nightly }}
+      samurihl: ${{ steps.r.outputs.samurihl }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - id: r
+        working-directory: partB-installer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Passed as env, never interpolated into the Python source: these are
+          # dispatch-time strings, and ${{ }} substitution would splice them into the
+          # program text.
+          CE_NIGHTLY: ${{ inputs.ce_nightly }}
+          SAMURIHL: ${{ inputs.samurihl }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, sys
+          sys.path.insert(0, "build")
+          import fetch_ce_payload as F
+          print("nightly=" + F.resolve_nightly(os.environ["CE_NIGHTLY"])[1])
+          print("samurihl=" + F.resolve_samurihl(os.environ["SAMURIHL"])[1])
+          PY
+
+  # Reuse build.yml wholesale: the drift tests AND the APK, with its cached debug keystore.
+  # Copying those steps here would eventually sign releases with a different key than CI, and
+  # a changed signer means every user must uninstall the app before they can update it.
+  # The APK lands as artifact RebootToCoreELEC-apk-<sha>.
+  build:
+    uses: ./.github/workflows/build.yml
+
+  toolbox:
+    name: build Toolbox addon
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.b.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - id: b
+        working-directory: partB-installer
+        run: |
+          set -euo pipefail
+          python3 build/build_toolbox_zip.py
+          z=$(ls artifacts/script.coreelec.toolbox-*.zip)
+          echo "version=$(basename "$z" .zip | sed 's/^script\.coreelec\.toolbox-//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toolbox
+          path: partB-installer/artifacts/script.coreelec.toolbox-*.zip
+          if-no-files-found: error
+
+  bundles:
+    name: ${{ matrix.device }} / ${{ matrix.flavour }}
+    needs: [resolve, build, toolbox]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [stick, box]
+        flavour: [nightly, samurihl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # mtools reads the CoreELEC image's FAT at a partition offset (no loop device, no root);
+      # dosfstools/e2fsprogs build our own ce_flash/ce_storage images.
+      - name: install image tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mtools dosfstools e2fsprogs util-linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: RebootToCoreELEC-apk-${{ github.sha }}
+          path: partB-installer/artifacts
+      - uses: actions/download-artifact@v4
+        with: { name: toolbox, path: partB-installer/artifacts }
+
+      - name: fetch the CoreELEC payload
+        working-directory: partB-installer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.flavour }}" = nightly ]; then
+            img="${{ needs.resolve.outputs.nightly }}"
+            ver=$(echo "$img" | sed -n 's/.*Piers_nightly_\([0-9]\{8\}\)-Generic.*/\1/p')
+            python3 build/fetch_ce_payload.py --source nightly --version "$ver"
+          else
+            # resolve.outputs.samurihl is the asset filename; map it back to its release tag.
+            stamp=$(echo "${{ needs.resolve.outputs.samurihl }}" | sed -n 's/.*EXPERIMENTAL_\([0-9]\{14\}\)-Generic.*/\1/p')
+            python3 build/fetch_ce_payload.py --source samurihl --version "v22.0-samurihl-$stamp"
+          fi
+
+      - name: build the flashable artifacts
+        working-directory: partB-installer
+        run: python3 build/build_all.py --device ${{ matrix.device }}
+
+      - name: assemble the bundle
+        working-directory: partB-installer
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.flavour }}" = samurihl ]; then
+            python3 make_dist.py --device ${{ matrix.device }} --suffix SamuriHL
+          else
+            python3 make_dist.py --device ${{ matrix.device }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.device }}-${{ matrix.flavour }}
+          path: partB-installer/partB-installer-*-dist.zip
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: [resolve, toolbox, bundles]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dl }
+      - name: collect the six assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          find dl -type f \( -name '*.zip' -o -name '*.apk' \) -exec cp {} assets/ \;
+          ls -l assets
+          n=$(ls assets | wc -l)
+          # Four bundles + the Toolbox zip + the APK. Anything else means a job silently
+          # produced nothing, and a short release is worse than no release.
+          [ "$n" -eq 6 ] || { echo "expected 6 assets, found $n"; exit 1; }
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          ## Bundled builds
+
+          | Bundle | CoreELEC |
+          |---|---|
+          | \`partB-installer-{stick,box}-dist.zip\` | \`${{ needs.resolve.outputs.nightly }}\` |
+          | \`partB-installer-{stick,box}-SamuriHL-dist.zip\` | \`${{ needs.resolve.outputs.samurihl }}\` |
+
+          CoreELEC Toolbox addon \`${{ needs.toolbox.outputs.version }}\`, and the
+          Reboot to CoreELEC APK, are identical in all four bundles.
+
+          Each bundle records its CoreELEC build in \`CE_BUILD.txt\` and hashes every
+          shipped file in \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.tag }}" \
+            --notes-file notes.md \
+            ${{ inputs.draft && '--draft' || '' }} \
+            assets/*

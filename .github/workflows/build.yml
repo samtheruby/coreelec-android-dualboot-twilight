@@ -14,6 +14,11 @@
 name: Build
 
 on:
+  # Callable so the release workflow reuses these exact jobs rather than copying them. The
+  # APK's cached debug keystore in particular MUST NOT be duplicated: a second copy that
+  # drifted would sign releases with a different key, and every user would have to uninstall
+  # the app before they could update it.
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -152,7 +157,23 @@ jobs:
           "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" \
             | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|^application-label:"
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk"
-          echo "APK parses, is signed, and is installable."
+
+          # The APK is a RELEASE ASSET, so the version it reports must be the version the
+          # source declares -- otherwise a bumped build.gradle can ship under the old number
+          # (or a stale APK can ride along under a new one) and nobody can tell which build
+          # a device is running.
+          gradle="partB-installer/app/RebootToCoreELEC/app/build.gradle"
+          wantCode=$(sed -n 's/^[[:space:]]*versionCode[[:space:]]\+\([0-9]\+\).*/\1/p' "$gradle")
+          wantName=$(sed -n "s/^[[:space:]]*versionName[[:space:]]\+'\([^']*\)'.*/\1/p" "$gradle")
+          badging=$("$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" | head -n1)
+          gotCode=$(echo "$badging" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+          gotName=$(echo "$badging" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          echo "build.gradle: versionCode=$wantCode versionName=$wantName"
+          echo "built APK   : versionCode=$gotCode versionName=$gotName"
+          [ -n "$wantCode" ] && [ -n "$wantName" ] || { echo "could not read the version out of $gradle"; exit 1; }
+          [ "$gotCode" = "$wantCode" ] && [ "$gotName" = "$wantName" ] || {
+            echo "APK version does not match build.gradle -- refusing to ship it"; exit 1; }
+          echo "APK parses, is signed, is installable, and matches build.gradle."
 
       - uses: actions/upload-artifact@v4
         with:

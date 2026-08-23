@@ -33,12 +33,23 @@ def win2wsl(p):
 
 
 def run_wsl(script, *args):
-    print(f"\n### (wsl) {script} {' '.join(args)}")
-    wp = win2wsl(os.path.join(HERE, script))
-    inner = "bash " + shq(wp) + "".join(" " + shq(a) for a in args)
-    r = subprocess.run(["wsl.exe", "-e", "bash", "-lc", inner])
+    """Run a build shell script.
+
+    These two steps need mkfs.vfat/mtools/mke2fs, which on Windows means WSL. Anywhere else --
+    a Linux dev box, or the release workflow's runner -- bash is right there, and shelling out
+    to wsl.exe is both wrong and unavailable. Pick by platform rather than assuming Windows.
+    """
+    if sys.platform == "win32":
+        print(f"\n### (wsl) {script} {' '.join(args)}")
+        wp = win2wsl(os.path.join(HERE, script))
+        inner = "bash " + shq(wp) + "".join(" " + shq(a) for a in args)
+        cmd = ["wsl.exe", "-e", "bash", "-lc", inner]
+    else:
+        print(f"\n### (bash) {script} {' '.join(args)}")
+        cmd = ["bash", os.path.join(HERE, script), *args]
+    r = subprocess.run(cmd)
     if r.returncode != 0:
-        sys.exit(f"{script} (wsl) failed")
+        sys.exit(f"{script} failed")
 
 
 def shq(s):
