@@ -99,6 +99,15 @@ partB-installer/payload/*
 !partB-installer/payload/flash/
 partB-installer/payload/flash/*
 !partB-installer/payload/flash/user-update.sh
+# resolution.ini is one of the three files build_ce_flash.sh ABORTS without, and it was the
+# only one not in git -- so the bundle could not be rebuilt from a clean clone, and CI could
+# not build it at all. CoreELEC regenerates this file on first boot from the attached display,
+# and only cfgload reads it (the eMMC boot path never runs cfgload -- the display settings for
+# an internal install come from the bootcefromemmc gate, see f924575). It is committed purely
+# so the build has a deterministic input. dovi.ko, the third required addition, is NOT listed
+# here on purpose: it stays single-sourced from addon/.../resources/repair/dovi.ko, which the
+# build already pins by sha256.
+!partB-installer/payload/flash/resolution.ini
 
 # Vendored Android app (Reboot to CoreELEC): keep source, drop build output
 # + machine-local config (local.properties carries your local SDK path).
