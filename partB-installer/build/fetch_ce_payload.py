@@ -61,8 +61,14 @@ SAMURIHL_API = "https://api.github.com/repos/SamuriHL/CoreELEC/releases"
 # Files CoreELEC puts on /flash that we re-ship. Missing REQUIRED is fatal: every one of these
 # is in a stock CoreELEC image, so its absence means the extraction went wrong, and a payload
 # that is quietly short by one file is exactly how this project has been bitten before.
-REQUIRED = ["SYSTEM", "SYSTEM.md5", "kernel.img", "kernel.img.md5", "dtb.img",
+REQUIRED = ["SYSTEM", "SYSTEM.md5", "kernel.img", "kernel.img.md5",
             "recovery.img", "cfgload", "aml_autoscript", "config.ini"]
+# dtb.img is NOT in a stock image -- CoreELEC picks one out of device_trees/ for the detected
+# board and writes it as dtb.img during install/update ("Updating dtb.img by dtb.xml..." in its
+# update log). We are building an image for a known board, so we select it ourselves, below.
+# It is taken from the device_trees/ of the image we just downloaded, never from a copy in the
+# repo: the dtb has to match the kernel it will be booted with.
+CE_DT_ID = "s7d_s905x5m_xiaomi_3rd_gen"   # stick and box are one board (see build_boota_dtboa.py)
 # Present in some builds only. Warn -- loudly -- rather than fail.
 OPTIONAL = ["cfgload_env"]
 # Directories copied wholesale.
@@ -249,6 +255,24 @@ def main():
         log(f"  {'!! MISSING' if m in REQUIRED else '   absent (optional)'} {m}")
     if hard:
         sys.exit(f"required files not found in the image FAT: {hard}")
+
+    # dtb.img: select this board's device tree out of the image's own device_trees/.
+    dt_src = os.path.join(a.dest, "device_trees", CE_DT_ID + ".dtb")
+    if not os.path.exists(dt_src):
+        have = sorted(os.listdir(os.path.join(a.dest, "device_trees")))
+        sys.exit(f"{CE_DT_ID}.dtb is not in this image's device_trees/ "
+                 f"({len(have)} present, e.g. {have[:5]}) -- CoreELEC dropped or renamed this "
+                 f"board's device tree, and guessing another one would boot the wrong hardware "
+                 f"description")
+    shutil.copyfile(dt_src, os.path.join(a.dest, "dtb.img"))
+    dtb = open(os.path.join(a.dest, "dtb.img"), "rb").read()
+    # Same two properties build_ce_flash.sh checks later, asserted here so a bad device tree is
+    # reported against the image it came from rather than 10 minutes into the image build.
+    if dtb[:4] != b"\xd0\x0d\xfe\xed":
+        sys.exit(f"{CE_DT_ID}.dtb does not start with the FDT magic d00dfeed")
+    if len(dtb) > 0x20000:
+        sys.exit(f"{CE_DT_ID}.dtb is {len(dtb)} B, past the 128 KiB dtbo span u-boot reads")
+    log(f"  dtb.img <- device_trees/{CE_DT_ID}.dtb ({len(dtb)} B, FDT magic OK)")
 
     log("verifying the checksums CoreELEC ships inside the image")
     verify_pair(a.dest, "SYSTEM", "SYSTEM.md5")
