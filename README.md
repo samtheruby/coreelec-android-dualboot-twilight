@@ -144,10 +144,20 @@ Out of the box a normal restart goes to Android. To make the device boot straigh
 You can also set this while installing by adding `--default coreelec` to the Step 5 command.
 
 **If switching stops working after a CoreELEC update**
-CoreELEC updates repair the dual-boot setup on their own. If a switch ever stops working right after one, run from the PC:
+CoreELEC updates repair the dual-boot setup on their own, and the **Reboot to CoreELEC** app repairs
+it too: every time you press the button it checks the dual-boot setup first and puts it back if an
+update broke it. So in almost every case there is nothing to do — just press the button again.
+
+You only need a PC if Android itself will not start, or root is gone, since the app cannot run then.
+In that case:
 ```
 python installer/reassert_env_gate.py --boot-ce 1
 ```
+
+One case the app will not fix by itself: if the setup has been wiped completely (a recovery factory
+reset does this), the app cannot tell for certain which slot CoreELEC is on. It asks first and says
+so, and you can cancel and use the PC command above instead, which is the safer choice if you are
+unsure.
 
 ---
 

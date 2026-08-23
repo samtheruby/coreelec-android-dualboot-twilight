@@ -8,6 +8,7 @@
 /*
 !/.gitattributes
 !/.gitignore
+!/.github/
 !/LICENSE
 !/README.md
 !/research.md

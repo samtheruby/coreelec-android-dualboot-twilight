@@ -17,15 +17,22 @@ import java.util.zip.CRC32
  * identity) are preserved byte-for-byte except boot_ce.
  */
 object EnvFlip {
-    private const val ENV_SIZE = 0x10000
-    private const val ENV_DEV = "/dev/block/by-name/env"
+    internal const val ENV_SIZE = 0x10000
+    internal const val ENV_DEV = "/dev/block/by-name/env"
 
     sealed class Result {
         object Ok : Result()
         data class Err(val msg: String) : Result()
     }
 
-    /** Set boot_ce then (optionally) reboot. Runs blocking; call off the UI thread. */
+    /**
+     * Set boot_ce then (optionally) reboot. Runs blocking; call off the UI thread.
+     *
+     * NOTE: this only flips the flag. If a CoreELEC update has clobbered the gate in
+     * `bootcmd`, nothing reads the flag any more and this silently does nothing on
+     * reboot. Callers should pre-flight with [EnvGate.gateIntact] and fall back to
+     * [EnvGate.reassert] -- see MainActivity.bootCoreElecViaEnv.
+     */
     fun bootCoreElec(reboot: Boolean = true): Result = setBootCe(1, reboot)
     fun bootAndroid(reboot: Boolean = true): Result = setBootCe(0, reboot)
 
@@ -47,7 +54,7 @@ object EnvFlip {
     }
 
     // ---- env codec (must match build/envtool.py) ----------------------------
-    private fun parse(env: ByteArray): LinkedHashMap<String, String> {
+    internal fun parse(env: ByteArray): LinkedHashMap<String, String> {
         val m = LinkedHashMap<String, String>()
         var i = 4
         val sb = StringBuilder()
@@ -67,7 +74,7 @@ object EnvFlip {
         return m
     }
 
-    private fun serialize(map: LinkedHashMap<String, String>): ByteArray {
+    internal fun serialize(map: LinkedHashMap<String, String>): ByteArray {
         // format: key=val \0 key=val \0 ... \0 (terminator) then 0x00 padding.
         // Separators/terminator are NUL (0x00), matching build/envtool.py exactly.
         val bodyBytes = ByteArray(ENV_SIZE - 4)        // zero-filled = padding
@@ -90,13 +97,13 @@ object EnvFlip {
         return out
     }
 
-    private fun withBootCe(env: ByteArray, value: Int): ByteArray {
+    internal fun withBootCe(env: ByteArray, value: Int): ByteArray {
         val m = parse(env)
         m["boot_ce"] = value.toString()
         return serialize(m)
     }
 
-    private fun verifyCrc(env: ByteArray): Boolean {
+    internal fun verifyCrc(env: ByteArray): Boolean {
         val stored = (env[0].toLong() and 0xff) or
                 ((env[1].toLong() and 0xff) shl 8) or
                 ((env[2].toLong() and 0xff) shl 16) or
@@ -106,7 +113,7 @@ object EnvFlip {
     }
 
     // ---- root I/O -----------------------------------------------------------
-    private fun readEnv(): ByteArray? {
+    internal fun readEnv(): ByteArray? {
         val p = ProcessBuilder("su", "-c", "dd if=$ENV_DEV bs=4096 count=16")
             .redirectErrorStream(false).start()
         val din = DataInputStream(p.inputStream)
@@ -121,7 +128,7 @@ object EnvFlip {
         return if (read >= ENV_SIZE) buf else null
     }
 
-    private fun writeEnv(env: ByteArray): Boolean {
+    internal fun writeEnv(env: ByteArray): Boolean {
         // write exactly 64 KiB to offset 0 of the env partition
         val p = ProcessBuilder("su", "-c", "dd of=$ENV_DEV bs=4096 conv=fsync")
             .redirectErrorStream(true).start()
@@ -129,7 +136,7 @@ object EnvFlip {
         return p.waitFor() == 0
     }
 
-    private fun runSu(cmd: String) {
+    internal fun runSu(cmd: String) {
         ProcessBuilder("su", "-c", cmd).start().waitFor()
     }
 }
