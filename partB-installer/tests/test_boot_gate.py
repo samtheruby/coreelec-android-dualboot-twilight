@@ -42,6 +42,8 @@ _KT = os.path.join(ROOT, "app", "RebootToCoreELEC", "app", "src", "main", "java"
 KOTLIN = os.path.join(_KT, "EnvFlip.kt")
 ENVGATE_KT = os.path.join(_KT, "EnvGate.kt")
 ENVADD_KT = os.path.join(_KT, "EnvAdditions.kt")
+KERNELGATE_KT = os.path.join(_KT, "KernelGate.kt")
+MAIN_KT = os.path.join(_KT, "MainActivity.kt")
 ADDITIONS_JSON = os.path.join(ROOT, "refdata", "env_additions.json")
 
 SLOTS = ("_a", "_b")
@@ -244,7 +246,7 @@ def hook_validates_the_env_blob_before_writing_it():
 # a healthy env image ("cannot measure ... no stat, no ls+awk"). They are in this list now so a
 # boot-critical path can never lean on them again:
 INITRAMFS_MISSING = ("wc", "expr", "find", "od", "cmp", "xargs", "mktemp", "sha256sum",
-                     "du", "sort", "stat", "awk")
+                     "md5sum", "du", "sort", "stat", "awk")
 
 
 def hook_uses_only_tools_the_initramfs_has():
@@ -287,6 +289,175 @@ def hook_sizes_env_with_only_guaranteed_primitives():
     assert not re.search(r"\|\|\s*echo\s+0", code), (
         "a failed size measurement is being turned into a size of 0, which reads as a "
         "truncated file and makes the hook refuse to restore a healthy env image")
+
+
+def _kt_branch(src, label):
+    """Body of the `is KernelGate.State.<label> ->` when-branch: brace-matched if it opens a
+    block, otherwise the rest of the line. Matching the branch exactly matters -- a regex that
+    runs past it happily finds the `true` belonging to the NEXT branch."""
+    i = src.index(f"is KernelGate.State.{label} ->")
+    rest = src[i:]
+    nl, brace = rest.index("\n"), rest.find("{")
+    if brace == -1 or brace > nl:
+        return rest[:nl]
+    depth = 0
+    for k in range(brace, len(rest)):
+        if rest[k] == "{":
+            depth += 1
+        elif rest[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return rest[brace:k + 1]
+    raise AssertionError(f"unbalanced braces in the {label} branch")
+
+
+def kernelgate_kt_compares_the_whole_image():
+    """The corruption that stranded the stick began at byte 23,973,888 of a 24,633,344-byte
+    image -- the kernel region and the first 97% of the ramdisk were byte-perfect. Any check
+    that hashes a fixed prefix, a sample, or the boot header calls that image healthy. So the
+    comparison must be sized from kernel.img itself and must cover all of it."""
+    src = _kt_source(KERNELGATE_KT)
+    assert re.search(r"SZ=\$\{'\$'\}\(stat -c %s", src), (
+        "KernelGate no longer sizes the comparison from /flash/kernel.img itself")
+    assert "FULL=" in src and "REM=" in src, (
+        "KernelGate must hash FULL 512-byte blocks plus any remainder -- a fixed block count "
+        "silently compares only part of the image")
+    assert re.search(r"count=\$\{'\$'\}FULL", src), (
+        "the boot-partition hash no longer reads the number of blocks kernel.img implies")
+    for bad in ("count=1 ", "bs=4096 count=16"):
+        assert bad not in src, f"KernelGate appears to hash only a prefix ({bad!r})"
+
+
+def kernelgate_kt_will_not_repair_from_an_unverified_source():
+    """CoreELEC ships kernel.img.md5 beside the image. If /flash/kernel.img fails it, copying
+    that file onto boot_<slot> would put the corruption where u-boot actually reads."""
+    src = _kt_source(KERNELGATE_KT)
+    assert re.search(r'echo "SHIPPED[^"]*kernel\.img\.md5|kernel\.img\.md5.*?echo "SHIPPED', src, re.S), (
+        "the shell no longer reports /flash/kernel.img.md5 as SHIPPED, so the source checksum "
+        "is never seen")
+    assert 'f["SHIPPED"]' in src, "KernelGate no longer reads the SHIPPED checksum back"
+    assert re.search(r"shipped[^\n]*equals\(src", src), (
+        "the shipped checksum is read but never compared against the source image")
+    assert re.search(r"SourceBad", src), "KernelGate no longer distinguishes a bad SOURCE"
+    m = re.search(r"fun repair\(.*?\n(.*?)\n    }", src, re.S)
+    assert m, "could not find KernelGate.repair()"
+    assert "SourceBad" in m.group(1), (
+        "repair() does not bail out on a SourceBad pre-check, so it can copy a corrupt "
+        "/flash/kernel.img onto the boot partition")
+
+
+def mainactivity_preflights_the_kernel_before_flipping_boot_ce():
+    """boot_ce is consumed by bootcmd BEFORE bootcefromemmc runs, so a reboot into a bad kernel
+    costs the flag as well as the boot: the box panics, comes back on Android, and the button
+    looks like it did nothing. Check the image first, and do not flip the flag when a verified
+    mismatch could not be repaired."""
+    src = _kt_source(MAIN_KT)
+    flip = src.index("EnvFlip.bootCoreElec")
+    pre = src.rindex("kernelImageUsable()", 0, flip)
+    assert pre < flip, "kernelImageUsable() must run BEFORE boot_ce is flipped"
+    m = re.search(r"private fun kernelImageUsable\(\).*?\n    }\n", src, re.S)
+    assert m, "kernelImageUsable() is gone"
+    body = m.group(0)
+    split = body.index("when (val after")
+    outer, inner = body[:split], body[split:]
+
+    # Fails OPEN on "cannot tell": blocking here would regress boxes whose CE_FLASH Android
+    # cannot mount, for a boot that would have worked.
+    for label in ("Unknown", "SourceBad"):
+        br = _kt_branch(outer, label)
+        assert "return true" in br and "return false" not in br, (
+            f"an unverifiable kernel image ({label}) must not block a boot that would have "
+            f"worked:\n{br}")
+
+    # Fails CLOSED once the mismatch is verified AND the repair did not take. repair() confirms
+    # by reading the partition back, so anything but Ok means boot_<slot> is still wrong.
+    for label in ("Stale", "SourceBad", "Unknown"):
+        br = _kt_branch(inner, label)
+        assert "false" in br and "true" not in br, (
+            f"after a failed repair the {label} branch still lets the reboot proceed; the box "
+            f"will panic and land back on Android:\n{br}")
+    assert "true" in _kt_branch(inner, "Ok"), "a verified repair must allow the reboot"
+
+
+def mainactivity_checks_the_kernel_on_the_gate_repair_path_too():
+    """The gate-repair path is the one that MOST needs the kernel check: a CoreELEC update
+    stomps bootcmd and re-syncs boot_<slot> in the same pass, so both break together. Checking
+    only on the gate-intact fast path leaves the common post-update case rebooting blind.
+
+    So no route may hand `reboot = true` to EnvGate.reassert() -- that reboots from inside
+    reassert, before anything has looked at the image. The reboot has to happen after the
+    check, which is why GateResult.Ok reboots explicitly."""
+    src = _kt_source(MAIN_KT)
+    bad = re.findall(r"EnvGate\.reassert\([^)]*reboot\s*=\s*true[^)]*\)", src)
+    assert not bad, (
+        "reassert() is asked to reboot on its own, so the gate-repair path reboots without "
+        f"checking the kernel image: {bad}")
+    m = re.search(r"is EnvGate\.GateResult\.Ok ->.*?\n            }", src, re.S)
+    assert m, "could not find the GateResult.Ok branch"
+    assert "kernelImageUsable()" in m.group(0), (
+        "a re-asserted gate reboots without checking the image it hands off to")
+    assert re.search(r'if \(kernelImageUsable\(\)\)\s*EnvFlip\.runSu\("reboot"\)', m.group(0)), (
+        "the reboot on the gate-repair path is not gated on the kernel check")
+
+
+def hook_checks_what_the_kernel_dd_actually_wrote():
+    """A real stick was stranded because this dd wrote all but the last 659,456 bytes of
+    kernel.img to boot_b, exited 0, and the hook logged "kernel written". The tail of the
+    zstd initramfs stayed behind from the previous kernel; u-boot loaded the image, the
+    kernel could not unpack the ramdisk, freed it, and panicked with "Requested init /init
+    failed (error -2)". boot_ce had already been consumed, so the next boot went to Android
+    and the failure looked like the switcher app doing nothing.
+
+    There is no cmp and no md5sum in this initramfs, so the hook cannot compare content. What
+    it CAN do is stop throwing away the one report dd makes about its own work: `dd` writes
+    "<N>+0 records out" to stderr, and `2>/dev/null` discarded it."""
+    src = open(HOOK, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert re.search(r"/flash/kernel\.img[^\n]*\$BOOTDEV", code), (
+        "the hook no longer writes /flash/kernel.img to $BOOTDEV")
+    stderr_binned = [ln.strip() for ln in code.splitlines()
+                     if "dd " in ln and "kernel.img" in ln and "2>/dev/null" in ln]
+    assert not stderr_binned, (
+        "a dd reading kernel.img still sends its stderr to /dev/null -- that stderr carries "
+        f"the 'records out' count, the only evidence of a short write available here: {stderr_binned}")
+    assert "records out" in code, (
+        "nothing in the hook checks dd's 'records out' count, so a short kernel write is "
+        "still reported as success")
+    assert re.search(r'dd if="\$_src" of="\$_dst"[^\n]*2>"\$DD_LOG"', code), (
+        "the verified-write helper must capture dd's stderr to inspect it")
+
+
+def hook_flushes_the_source_before_reading_it():
+    """The CoreELEC updater writes /flash/kernel.img and then calls this hook. If those writes
+    are not on the platter yet, the hook can copy a partly-stale file to boot_<slot>. `sync`
+    commits them; dropping the caches then forces the read to come from eMMC rather than from
+    a page cache that may disagree. Order matters: sync BEFORE drop_caches, or the drop can
+    discard the updater's not-yet-written data and the re-read returns the OLD file."""
+    src = open(HOOK, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    m = re.search(r"^[^\n]*/flash/kernel\.img[^\n]*\$BOOTDEV[^\n]*$", code, re.M)
+    assert m, "the hook no longer writes /flash/kernel.img to $BOOTDEV"
+    pre = code[:m.start()]
+    syncs = [x.start() for x in re.finditer(r"^\s*sync\s*$", pre, re.M)]
+    sync_at = syncs[-1] if syncs else -1
+    drop_at = pre.rfind("drop_caches")
+    assert sync_at != -1, "no sync before the kernel write -- the source may not be on disk yet"
+    assert drop_at != -1, (
+        "nothing drops the page cache before the kernel write, so a stale cached kernel.img "
+        "can be copied to boot_<slot>")
+    assert sync_at < drop_at, (
+        "drop_caches runs before sync; that can discard the updater's pending writes and make "
+        "the re-read return the PREVIOUS kernel.img")
+
+
+def hook_never_claims_an_unverified_kernel_write_succeeded():
+    """The hook cannot verify content here (no cmp, no md5sum). It must say so rather than
+    log a bare "kernel written", which is what made this failure invisible for two updates."""
+    src = open(HOOK, encoding="utf-8").read()
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert not re.search(r'log\s+"\s*kernel written"', code), (
+        "the hook still logs an unqualified 'kernel written'; it can only attest to the byte "
+        "count dd reported, and the log should not imply more than that")
 
 
 def hook_is_device_independent():
@@ -336,6 +507,19 @@ if __name__ == "__main__":
     check("user-update.sh validates env_dualboot.bin before writing", hook_validates_the_env_blob_before_writing_it)
     check("user-update.sh only calls tools the initramfs busybox has", hook_uses_only_tools_the_initramfs_has)
     check("user-update.sh sizes env with only dd + [ -s ]", hook_sizes_env_with_only_guaranteed_primitives)
+    check("KernelGate.kt compares the whole kernel image", kernelgate_kt_compares_the_whole_image)
+    check("KernelGate.kt will not repair from an unverified source",
+          kernelgate_kt_will_not_repair_from_an_unverified_source)
+    check("MainActivity pre-flights the kernel before flipping boot_ce",
+          mainactivity_preflights_the_kernel_before_flipping_boot_ce)
+    check("MainActivity checks the kernel on the gate-repair path too",
+          mainactivity_checks_the_kernel_on_the_gate_repair_path_too)
+    check("user-update.sh checks dd's 'records out' on the kernel write",
+          hook_checks_what_the_kernel_dd_actually_wrote)
+    check("user-update.sh syncs then drops caches before reading kernel.img",
+          hook_flushes_the_source_before_reading_it)
+    check("user-update.sh does not claim an unverified kernel write succeeded",
+          hook_never_claims_an_unverified_kernel_write_succeeded)
     check("user-update.sh is device-independent (no mmcblk0pN)", hook_is_device_independent)
     print("the gate is device-independent")
     check("gate_vars depends only on (slot, default)", gate_does_not_vary_by_device)

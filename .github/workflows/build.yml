@@ -51,6 +51,13 @@ jobs:
             python3 "$t" || fail=1
             echo "::endgroup::"
           done
+          # The Python suites read the update hook as text. test_update_hook.sh EXECUTES its
+          # write helpers, which is the only way to know they actually run in a POSIX shell.
+          for t in tests/test_*.sh; do
+            echo "::group::$t"
+            sh "$t" || fail=1
+            echo "::endgroup::"
+          done
           exit $fail
 
   apk:

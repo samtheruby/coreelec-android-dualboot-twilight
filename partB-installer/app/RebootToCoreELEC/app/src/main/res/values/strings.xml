@@ -12,4 +12,6 @@
     <string name="gate_missing_title">Boot gate missing</string>
     <string name="gate_missing_msg">The CoreELEC boot gate is gone from the bootloader environment, so it has to be rebuilt from scratch.\n\nAndroid is running on slot %1$s, so CoreELEC should be on slot %2$s. That is only correct if Android has never switched slots via an OTA.\n\nIf you are not sure, cancel and run reassert_env_gate.py from a PC instead.</string>
     <string name="gate_missing_rebuild">Rebuild gate</string>
+    <string name="kernel_repairing">Repairing the CoreELEC kernel image…</string>
+    <string name="kernel_repair_failed">CoreELEC kernel image is damaged and could not be repaired: %1$s</string>
 </resources>

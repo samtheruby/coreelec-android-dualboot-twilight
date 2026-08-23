@@ -111,6 +111,59 @@ def bundled_dovi_matches_pin():
     assert got == DOVI_SHA256, f"bundled dovi.ko {got} != pinned {DOVI_SHA256}"
 
 
+def _boot_img(payload, part_size=64 * 1024 * 1024):
+    """A boot_<slot> partition image: the kernel image, then whatever the partition already
+    held. Partitions are far larger than kernel.img, so the trailing bytes are always there."""
+    return payload + b"\xa5" * (part_size - len(payload))
+
+
+def kernel_image_current_is_ok():
+    ki = b"ANDROID!" + os.urandom(4096)
+    r = rc.check_kernel_image(_boot_img(ki), ki)
+    assert r.status == rc.OK, r
+
+
+def kernel_image_stale_tail_needs_fix():
+    """The failure that stranded a real stick: the CE update hook's dd wrote all but the last
+    659,456 bytes of kernel.img to boot_b and still exited 0, so the kernel region matched and
+    the tail of the zstd initramfs was left over from the PREVIOUS kernel. u-boot loaded it,
+    the kernel could not unpack the ramdisk, freed it, and panicked on a missing /init.
+    A check that samples the head -- or trusts dd's exit status -- does not see this."""
+    ki = b"ANDROID!" + os.urandom(200_000)
+    written = ki[:150_000] + os.urandom(len(ki) - 150_000)   # correct prefix, stale tail
+    r = rc.check_kernel_image(_boot_img(written), ki)
+    assert r.status == rc.NEEDS_FIX, r
+    assert r.reboot is True, r
+
+
+def kernel_image_unreadable_needs_fix():
+    ki = b"ANDROID!" + os.urandom(4096)
+    r = rc.check_kernel_image(None, ki)
+    assert r.status == rc.NEEDS_FIX, r
+
+
+def kernel_image_missing_source_is_unknown():
+    """No /flash/kernel.img means nothing to compare against and nothing to repair FROM."""
+    r = rc.check_kernel_image(_boot_img(b"whatever"), None)
+    assert r.status == rc.UNKNOWN, r
+
+
+def kernel_image_corrupt_source_is_unknown_not_needs_fix():
+    """If /flash/kernel.img itself fails the md5 CoreELEC ships next to it, boot_<slot> may
+    well be fine and the source is the broken one. Reporting NEEDS_FIX here would invite a
+    repair that copies the corruption onto the boot partition."""
+    ki = b"ANDROID!" + os.urandom(4096)
+    r = rc.check_kernel_image(_boot_img(ki), ki, kernel_md5_text="%s  target/KERNEL\n" % ("0" * 32))
+    assert r.status == rc.UNKNOWN, r
+
+
+def kernel_image_honours_a_matching_shipped_md5():
+    ki = b"ANDROID!" + os.urandom(4096)
+    md5 = hashlib.md5(ki).hexdigest()
+    r = rc.check_kernel_image(_boot_img(ki), ki, kernel_md5_text="%s  target/KERNEL\n" % md5)
+    assert r.status == rc.OK, r
+
+
 def bundled_hook_matches_payload():
     a = open(os.path.join(REPAIR_DIR, "user-update.sh"), "rb").read()
     b = open(os.path.join(ROOT, "payload", "flash", "user-update.sh"), "rb").read()
@@ -128,6 +181,12 @@ if __name__ == "__main__":
     check("file missing -> NEEDS_FIX", file_missing_needs_fix)
     check("build_fixed_env repairs + preserves default", build_fixed_env_repairs_and_preserves_default)
     check("build_fixed_env rejects gateless env", build_fixed_env_rejects_gateless)
+    check("kernel image current -> OK", kernel_image_current_is_ok)
+    check("kernel image stale tail -> NEEDS_FIX", kernel_image_stale_tail_needs_fix)
+    check("kernel image unreadable -> NEEDS_FIX", kernel_image_unreadable_needs_fix)
+    check("kernel image missing source -> UNKNOWN", kernel_image_missing_source_is_unknown)
+    check("kernel image corrupt source -> UNKNOWN", kernel_image_corrupt_source_is_unknown_not_needs_fix)
+    check("kernel image matching shipped md5 -> OK", kernel_image_honours_a_matching_shipped_md5)
     check("bundled dovi.ko == pinned sha256", bundled_dovi_matches_pin)
     check("bundled user-update.sh == payload copy", bundled_hook_matches_payload)
     print()

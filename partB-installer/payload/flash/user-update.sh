@@ -132,23 +132,106 @@ log "nodes: $BOOTP -> $BOOTDEV   $DTBOP -> $DTBODEV"
 # --- 3. re-sync kernel + dtb to the u-boot-readable named partitions ---------
 # rc is checked now: a dd that fails here leaves CoreELEC with a stale or half-written
 # kernel, and the old code discarded the status and still logged "done".
+#
+# v5: a stick was stranded by a dd that exited 0 having written all but the last 659,456
+# bytes of kernel.img. The kernel region of boot_b matched perfectly and only the tail of
+# the zstd initramfs was left over from the previous kernel, so u-boot loaded the image, the
+# kernel could not unpack the ramdisk, freed it, and panicked:
+#     rootfs image is not initramfs (ZSTD-compressed data is corrupt); looks like an initrd
+#     Kernel panic - not syncing: Requested init /init failed (error -2).
+# boot_ce is consumed BEFORE bootcefromemmc runs, so the next boot went to Android and the
+# whole thing looked like the switcher app silently doing nothing.
+#
+# We cannot verify content here: there is no cmp and no md5sum in this initramfs (see
+# INITRAMFS_MISSING in tests/test_boot_gate.py). Two things we CAN do:
+#   * make the source trustworthy before reading it -- sync (commit the updater's writes),
+#     then drop the caches (force the read to come off eMMC). sync MUST come first: dropping
+#     first can discard the updater's pending writes and hand us the PREVIOUS kernel.img.
+#   * stop discarding dd's stderr. dd reports "<N>+0 records out"; that count is the only
+#     evidence of a short write available in this environment, and `2>/dev/null` threw it
+#     away. We know the expected N because is_size_of() measures the source with dd alone.
+# This attests to the byte count dd reported -- not to what reached the platter. The real
+# content check lives where the tools exist: KernelGate in the switcher app, and the
+# Toolbox repair suite (repair_core.check_kernel_image).
 RC=0
+
+# Largest byte count the file has, by doubling then bisecting with is_size()'s probe. dd and
+# `[ -s ]` only, for the same reason is_size() is: an optional applet that is missing must
+# never read as a bad file.
+file_size() {
+  _f=$1; _lo=0; _hi=1
+  while has_byte_at "$_f" "$_hi"; do
+    _lo=$_hi; _hi=$(( _hi * 2 ))
+    [ "$_hi" -gt 1073741824 ] && return 1        # 1 GiB: nothing here is remotely this big
+  done
+  while [ $(( _hi - _lo )) -gt 1 ]; do
+    _mid=$(( (_lo + _hi) / 2 ))
+    if has_byte_at "$_f" "$_mid"; then _lo=$_mid; else _hi=$_mid; fi
+  done
+  # _lo is the highest offset that yields a byte, so the file is _lo + 1 bytes long.
+  has_byte_at "$_f" 0 || { echo 0; return 0; }
+  echo $(( _lo + 1 ))
+}
+
+# Does file $1 have a byte at 0-indexed offset $2? Same primitive is_size() is built from.
+has_byte_at() {
+  dd if="$1" bs=1 skip="$2" count=1 of="$ENV_PROBE" 2>/dev/null
+  if [ -s "$ENV_PROBE" ]; then rm -f "$ENV_PROBE"; return 0; fi
+  rm -f "$ENV_PROBE"; return 1
+}
+
+# Write $1 -> $2 with dd, then hold dd to the record count its own source size implies.
+# Retries once: the failure this guards against was transient on the box we saw it on.
+DD_LOG=/flash/.dd_log.$$
+write_verified() {
+  _src=$1; _dst=$2; _what=$3
+  _sz=$(file_size "$_src") || { log "  ERROR: cannot measure $_src -- refusing to write $_what"; return 1; }
+  if [ "$_sz" = 0 ]; then log "  ERROR: $_src measured 0 bytes -- refusing to write $_what"; return 1; fi
+  # dd's default block size is 512. A size that is not a multiple of 512 makes the last read
+  # a partial one, which dd reports as "N+1 records out" rather than "N+0". Work out both the
+  # expected record line and the expected byte line: busybox builds vary in which they print,
+  # and demanding a line this dd never emits would fail every healthy update.
+  _blocks=$(( _sz / 512 ))
+  _rem=$(( _sz - _blocks * 512 ))
+  if [ "$_rem" = 0 ]; then _want_rec="$_blocks+0 records out"; else _want_rec="$_blocks+1 records out"; fi
+  _try=1
+  while [ "$_try" -le 2 ]; do
+    rm -f "$DD_LOG"
+    dd if="$_src" of="$_dst" conv=fsync 2>"$DD_LOG"
+    _rc=$?
+    sync
+    if [ "$_rc" = 0 ] && { grep -q "^$_want_rec" "$DD_LOG" || grep -q "^$_sz bytes" "$DD_LOG"; }; then
+      log "  $_what: dd accounted for all $_sz bytes (attempt $_try)"
+      rm -f "$DD_LOG"; return 0
+    fi
+    log "  WARNING: $_what write did not account for all $_sz bytes (attempt $_try, rc=$_rc):"
+    while read -r _ln; do log "    dd: $_ln"; done < "$DD_LOG"
+    _try=$(( _try + 1 ))
+  done
+  rm -f "$DD_LOG"
+  return 1
+}
+
 if [ -f /flash/kernel.img ]; then
+  # The updater has just rewritten this file. Commit it, then read it off the eMMC.
+  sync
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
   log "writing /flash/kernel.img -> $BOOTP"
-  if dd if=/flash/kernel.img of="$BOOTDEV" conv=fsync 2>/dev/null; then
-    log "  kernel written"
+  if write_verified /flash/kernel.img "$BOOTDEV" "kernel"; then
+    log "  kernel write accounted for (byte count only -- content is checked by the switcher app)"
   else
-    log "  ERROR: writing kernel.img to $BOOTDEV FAILED -- CoreELEC may not boot"
+    log "  ERROR: writing kernel.img to $BOOTDEV FAILED or came up short -- CoreELEC may not boot."
+    log "  ERROR: press 'Reboot to CoreELEC' on Android; the app re-checks and repairs this image."
     RC=1
   fi
 fi
 if [ -f /flash/dtb.img ]; then
   log "writing /flash/dtb.img -> $DTBOP (zero 128 KiB first)"
   dd if=/dev/zero of="$DTBODEV" bs=1024 count=128 2>/dev/null
-  if dd if=/flash/dtb.img of="$DTBODEV" conv=fsync 2>/dev/null; then
-    log "  dtb written"
+  if write_verified /flash/dtb.img "$DTBODEV" "dtb"; then
+    log "  dtb write accounted for"
   else
-    log "  ERROR: writing dtb.img to $DTBODEV FAILED -- CoreELEC may not boot"
+    log "  ERROR: writing dtb.img to $DTBODEV FAILED or came up short -- CoreELEC may not boot"
     RC=1
   fi
 fi
